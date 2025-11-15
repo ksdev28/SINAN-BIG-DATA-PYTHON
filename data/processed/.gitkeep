@@ -1,0 +1,3 @@
+# Este diretório armazena dados pré-processados
+# Execute: python scripts/preprocess_data.py para gerar os dados
+

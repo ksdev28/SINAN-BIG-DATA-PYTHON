@@ -1,0 +1,7 @@
+# Requisitos adicionais para melhor performance com DuckDB
+# Instale com: pip install -r requirements_duckdb.txt
+
+duckdb>=0.9.0
+
+
+
