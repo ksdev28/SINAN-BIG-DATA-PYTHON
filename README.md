@@ -63,6 +63,7 @@ python scripts/preprocess_data.py
 ```
 
 **Benefícios:**
+
 - ⚡ Carregamento muito mais rápido do dashboard
 - 💾 Dados já processados e otimizados
 - 🎯 Ideal para compartilhar o projeto (dados já prontos)
@@ -72,6 +73,7 @@ python scripts/preprocess_data.py
 ### 3. Executar o Dashboard
 
 **Opção 1: Usando o script (Recomendado)**
+
 ```bash
 # Windows (duplo clique ou execute no terminal)
 run_dashboard.bat
@@ -82,6 +84,7 @@ python run_dashboard.py
 ```
 
 **Opção 2: Comando direto**
+
 ```bash
 # A partir da raiz do projeto
 streamlit run src/dashboard_sinan_real_data.py
@@ -115,6 +118,57 @@ python -m jupyterlab
 - **Plotly**: Visualizações interativas
 - **Jupyter**: Análises exploratórias
 
+## 🚂 Deploy no Railway
+
+O projeto está configurado para deploy no Railway. O script de inicialização (`start_railway.py`) automaticamente:
+
+1. Verifica se os dados pré-processados existem
+2. Executa o preprocessamento se necessário
+3. Inicia o dashboard Streamlit
+
+### Como fazer deploy:
+
+1. **Instale o Railway CLI** (opcional, mas recomendado):
+
+   ```bash
+   npm i -g @railway/cli
+   ```
+
+2. **Faça login no Railway**:
+
+   ```bash
+   railway login
+   ```
+
+3. **Inicialize um novo projeto**:
+
+   ```bash
+   railway init
+   ```
+
+4. **Configure as variáveis de ambiente** (se necessário):
+
+   ```bash
+   railway variables set PORT=8501
+   ```
+
+5. **Faça o deploy**:
+   ```bash
+   railway up
+   ```
+
+**Importante:**
+
+- Os dados brutos (`data/raw/VIOLBR-PARQUET/`) devem estar no repositório ou ser carregados via volume persistente
+- O Railway executará o preprocessamento na primeira inicialização
+- O arquivo `.railwayignore` está configurado para otimizar o upload
+
+### Arquivos de Configuração Railway:
+
+- `railway.json` - Configuração do Railway
+- `start_railway.py` - Script de inicialização
+- `.railwayignore` - Arquivos a ignorar no deploy
+
 ## 📝 Documentação Adicional
 
 - [Documentação do Dashboard](docs/README_DASHBOARD.md)
@@ -133,4 +187,3 @@ python -m jupyterlab
 2. Adicione documentação para novas funcionalidades
 3. Use os scripts em `scripts/` para análises temporárias
 4. Mantenha notebooks em `notebooks/` para análises exploratórias
-
