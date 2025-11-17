@@ -9,7 +9,7 @@ DuckDB permite consultas SQL diretas em arquivos parquet sem carregar tudo na me
 import duckdb
 import pandas as pd
 from pathlib import Path
-from sinan_data_processor_comprehensive import SINANDataProcessorComprehensive
+from .sinan_data_processor_comprehensive import SINANDataProcessorComprehensive
 
 class SINANDataProcessorDuckDB:
     """
@@ -92,7 +92,7 @@ class SINANDataProcessorDuckDB:
         Returns:
             DataFrame filtrado
         """
-        print("🚀 Carregando dados com DuckDB (otimizado)...")
+        print("[INFO] Carregando dados com DuckDB (otimizado)...")
         
         # Definir colunas essenciais
         essential_columns = [
@@ -140,19 +140,20 @@ class SINANDataProcessorDuckDB:
         
         if age_filter:
             # Códigos de idade: 4000 (menor de 1 ano) até 4017 (17 anos)
-            age_codes = ['4000'] + [f'400{i}' for i in range(1, 18)]
+            # Formato: 4000, 4001, ..., 4009, 4010, 4011, ..., 4017
+            age_codes = [f'400{i}' if i < 10 else f'40{i}' for i in range(0, 18)]
             age_list = "', '".join(age_codes)
             filters['NU_IDADE_N'] = f"IN ('{age_list}')"
         
         # Carregar dados filtrados
-        print(f"   📊 Aplicando filtros: idade={age_filter}, violência={violence_filter}")
+        print(f"   [INFO] Aplicando filtros: idade={age_filter}, violencia={violence_filter}")
         df = self.query_with_filters(filters=filters, columns=available_columns)
         
-        print(f"   ✅ Registros carregados: {len(df):,}")
+        print(f"   [OK] Registros carregados: {len(df):,}")
         
         # Aplicar filtro de violência se necessário (usando pandas após carregar)
         if violence_filter and len(df) > 0:
-            print("   🔍 Filtrando por tipo de violência...")
+            print("   [INFO] Filtrando por tipo de violencia...")
             violence_columns = ['VIOL_SEXU', 'VIOL_FISIC', 'VIOL_PSICO', 'VIOL_INFAN']
             available_violence_cols = [col for col in violence_columns if col in df.columns]
             
@@ -173,7 +174,7 @@ class SINANDataProcessorDuckDB:
                 
                 df_filtered = df[combined_condition].copy()
                 
-                print(f"   ✅ Casos de violência: {len(df_filtered):,}")
+                print(f"   [OK] Casos de violencia: {len(df_filtered):,}")
                 return df_filtered
         
         return df

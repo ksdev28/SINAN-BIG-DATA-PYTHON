@@ -126,6 +126,12 @@ RELACIONAMENTO_DICT = {
     'REL_ESPEC': 'Específico'
 }
 
+# Classe auxiliar para dados pré-processados (deve estar no nível do módulo para serialização)
+class MinimalProcessor:
+    """Processador mínimo para compatibilidade com dados pré-processados"""
+    def __init__(self):
+        self.dictionaries = {}
+
 # Carregamento e Tratamento dos Dados
 @st.cache_data(ttl=3600, max_entries=1)  # Limitar cache para evitar MemoryError
 def load_sinan_data(use_duckdb=True, use_preprocessed=True):
@@ -133,34 +139,78 @@ def load_sinan_data(use_duckdb=True, use_preprocessed=True):
     Carrega dados reais do SINAN dos arquivos parquet (otimizado para grandes volumes)
     
     Args:
-        use_duckdb: Se True e DuckDB disponível, usa DuckDB para melhor performance
-        use_preprocessed: Se True, tenta carregar dados pré-processados primeiro
+        use_duckdb: Se True e DuckDB disponível, usa DuckDB para melhor performance (fallback)
+        use_preprocessed: Se True, tenta carregar dados pré-processados primeiro (mais rápido)
     """
     # Verificar se existem dados pré-processados
     if use_preprocessed:
         processed_file = project_root / "data" / "processed" / "sinan_data_processed.parquet"
         if processed_file.exists():
             try:
-                print("📦 Carregando dados pré-processados...")
+                print("[INFO] Carregando dados pre-processados...")
                 df = pd.read_parquet(processed_file)
-                print(f"✅ Dados pré-processados carregados: {len(df):,} registros")
+                print(f"[OK] Dados pre-processados carregados: {len(df):,} registros")
+                
+                # Verificar se as colunas essenciais existem
+                colunas_essenciais = ['NU_IDADE_N', 'DT_NOTIFIC', 'CS_SEXO']
+                colunas_faltando = [col for col in colunas_essenciais if col not in df.columns]
+                if colunas_faltando:
+                    print(f"[AVISO] Colunas faltando nos dados pre-processados: {colunas_faltando}")
+                    print("[INFO] Continuando com processamento normal...")
+                    raise ValueError(f"Colunas essenciais faltando: {colunas_faltando}")
+                
+                # Verificar se as colunas derivadas já existem
+                colunas_derivadas = ['ANO_NOTIFIC', 'TIPO_VIOLENCIA', 'SEXO', 'UF_NOTIFIC', 'FAIXA_ETARIA']
+                colunas_derivadas_faltando = [col for col in colunas_derivadas if col not in df.columns]
+                
+                if colunas_derivadas_faltando:
+                    print(f"[INFO] Criando colunas derivadas faltantes: {colunas_derivadas_faltando}")
+                    df = create_derived_columns(df)
+                else:
+                    print("[OK] Todas as colunas derivadas ja existem nos dados pre-processados")
+                
+                # Aplicar filtro de violência se necessário (os dados pré-processados podem não ter filtro)
+                # Verificar se há registros sem violência marcada
+                violencia_cols = ['VIOL_SEXU', 'VIOL_FISIC', 'VIOL_PSICO', 'VIOL_INFAN']
+                violencia_disponiveis = [col for col in violencia_cols if col in df.columns]
+                
+                if violencia_disponiveis:
+                    # Verificar quantos registros têm violência marcada
+                    def tem_violencia(row):
+                        for col in violencia_disponiveis:
+                            val = str(row.get(col, '')).upper().strip()
+                            if val in ['1', 'SIM', 'S', '1.0']:
+                                return True
+                            if pd.notna(row.get(col)) and row[col] == 1:
+                                return True
+                        return False
+                    
+                    registros_com_violencia = df[df.apply(tem_violencia, axis=1)]
+                    registros_sem_violencia = len(df) - len(registros_com_violencia)
+                    
+                    if registros_sem_violencia > 0:
+                        print(f"[INFO] Aplicando filtro de violencia (removendo {registros_sem_violencia:,} registros sem violencia)...")
+                        df = registros_com_violencia.copy()
+                        print(f"[OK] {len(df):,} registros com violencia marcada")
+                    else:
+                        print("[OK] Todos os registros ja tem violencia marcada")
                 
                 # Criar um processador mínimo apenas para compatibilidade
-                # (os dados já vêm processados)
-                class MinimalProcessor:
-                    def __init__(self):
-                        self.dictionaries = {}
-                
                 processor = MinimalProcessor()
+                
+                print("[OK] Dados pre-processados prontos para uso!")
                 return df, processor
             except Exception as e:
-                print(f"⚠️ Erro ao carregar dados pré-processados: {e}")
-                print("🔄 Continuando com processamento normal...")
+                print(f"[ERRO] Erro ao carregar dados pre-processados: {e}")
+                import traceback
+                print(f"[DEBUG] Traceback completo:")
+                traceback.print_exc()
+                print("[INFO] Continuando com processamento normal...")
     
     try:
         # Usar DuckDB se disponível (muito mais rápido)
         if use_duckdb and DUCKDB_AVAILABLE:
-            print("🚀 Usando DuckDB para carregamento otimizado...")
+            print("[INFO] Usando DuckDB para carregamento otimizado...")
             violence_path = project_root / "data" / "raw" / "VIOLBR-PARQUET"
             dict_path = project_root / "data" / "config" / "TAB_SINANONLINE"
             with SINANDataProcessorDuckDB(
@@ -222,7 +272,8 @@ def load_sinan_data(use_duckdb=True, use_preprocessed=True):
             # Filtrar por código de idade diretamente (mais eficiente)
             if 'NU_IDADE_N' in violence_data.columns:
                 # Códigos de idade: 4000 (menor de 1 ano) até 4017 (17 anos)
-                age_codes = ['4000'] + [f'400{i}' for i in range(1, 18)]
+                # Formato: 4000, 4001, ..., 4009, 4010, 4011, ..., 4017
+                age_codes = [f'400{i}' if i < 10 else f'40{i}' for i in range(0, 18)]
                 
                 # Converter para string e filtrar
                 age_str = violence_data['NU_IDADE_N'].astype(str)
@@ -298,322 +349,8 @@ def load_sinan_data(use_duckdb=True, use_preprocessed=True):
             # Preparar dados para visualização (usar shallow copy)
             df = child_data.copy(deep=False)
         
-        # Função auxiliar para processar datas
-        def process_date_column(df, col_name):
-            """Processa coluna de data no formato YYYYMMDD"""
-            if col_name in df.columns:
-                try:
-                    # Primeiro, tentar converter strings vazias ou espaços para None
-                    df[col_name] = df[col_name].replace(['', '        ', ' '], None)
-                    
-                    # Tentar formato YYYYMMDD primeiro (formato mais comum no SINAN)
-                    # Converter para string primeiro para garantir formato
-                    df[col_name] = df[col_name].astype(str).replace(['nan', 'None', 'NaT'], None)
-                    df[col_name] = pd.to_datetime(df[col_name], format='%Y%m%d', errors='coerce')
-                except Exception as e:
-                    try:
-                        # Tentar outros formatos
-                        df[col_name] = pd.to_datetime(df[col_name], errors='coerce')
-                    except:
-                        # Se falhar, manter como está
-                        pass
-            return df
-        
-        # Processar todas as colunas de data
-        date_columns = ['DT_NOTIFIC', 'DT_OCOR', 'DT_ENCERRA', 'DT_DIGITA', 'DT_INVEST']
-        for col in date_columns:
-            df = process_date_column(df, col)
-        
-        # Extrair ano da data de notificação
-        if 'DT_NOTIFIC' in df.columns:
-            df['ANO_NOTIFIC'] = df['DT_NOTIFIC'].dt.year
-        elif 'NU_ANO' in df.columns:
-            df['ANO_NOTIFIC'] = pd.to_numeric(df['NU_ANO'], errors='coerce')
-        else:
-            df['ANO_NOTIFIC'] = None
-        
-        # Calcular tempo entre ocorrência e denúncia (em dias)
-        if 'DT_OCOR' in df.columns and 'DT_NOTIFIC' in df.columns:
-            # Verificar se ambas as datas são válidas antes de calcular
-            mask_validas = df['DT_NOTIFIC'].notna() & df['DT_OCOR'].notna()
-            df['TEMPO_OCOR_DENUNCIA'] = None
-            if mask_validas.any():
-                # Calcular diferença apenas para registros com ambas as datas válidas
-                df.loc[mask_validas, 'TEMPO_OCOR_DENUNCIA'] = (
-                    df.loc[mask_validas, 'DT_NOTIFIC'] - df.loc[mask_validas, 'DT_OCOR']
-                ).dt.days
-                # Filtrar valores inválidos (negativos ou muito grandes)
-                df.loc[mask_validas, 'TEMPO_OCOR_DENUNCIA'] = df.loc[mask_validas, 'TEMPO_OCOR_DENUNCIA'].apply(
-                    lambda x: x if pd.notna(x) and 0 <= x <= 3650 else None  # Máximo 10 anos
-                )
-        
-        # Processar coluna de evolução (status do caso)
-        # NOTA: Esta funcionalidade foi desabilitada porque os dados não trazem informação útil
-        # 99.99% dos registros têm EVOLUCAO vazia, tornando esta análise irrelevante
-        # A coluna STATUS_CASO não será criada para economizar processamento
-        # Se necessário no futuro, pode ser reativada quando os dados tiverem mais informações
-        # 
-        # Código comentado (pode ser reativado no futuro):
-        # def determinar_status_caso(row):
-        #     """Determina o status do caso baseado em EVOLUCAO e DT_ENCERRA"""
-        #     # ... código da função ...
-        # if 'EVOLUCAO' in df.columns or 'DT_ENCERRA' in df.columns:
-        #     df['STATUS_CASO'] = df.apply(determinar_status_caso, axis=1)
-        # else:
-        #     df['STATUS_CASO'] = 'Não informado'
-        
-        # Processar encaminhamentos para justiça
-        encaminhamento_cols = ['ENC_DELEG', 'ENC_DPCA', 'ENC_MPU', 'ENC_VARA']
-        if any(col in df.columns for col in encaminhamento_cols):
-            def get_encaminhamentos_justica(row):
-                encaminhamentos = []
-                for col in encaminhamento_cols:
-                    if col in row.index and pd.notna(row[col]):
-                        val = str(row[col]).upper().strip()
-                        # Verificar se é '1', 'SIM', 'S', '1.0' ou se é numérico e igual a 1
-                        if val in ['1', 'SIM', 'S', '1.0'] or (val.isdigit() and int(val) == 1):
-                            if col == 'ENC_DELEG':
-                                encaminhamentos.append('Delegacia')
-                            elif col == 'ENC_DPCA':
-                                encaminhamentos.append('DPCA')
-                            elif col == 'ENC_MPU':
-                                encaminhamentos.append('Ministério Público')
-                            elif col == 'ENC_VARA':
-                                encaminhamentos.append('Vara da Infância')
-                return ', '.join(encaminhamentos) if encaminhamentos else 'Nenhum'
-            
-            df['ENCAMINHAMENTOS_JUSTICA'] = df.apply(get_encaminhamentos_justica, axis=1)
-        else:
-            df['ENCAMINHAMENTOS_JUSTICA'] = 'Não informado'
-        
-        # Dicionário de códigos IBGE para nomes de estados
-        uf_dict = {
-            '11': 'Rondônia', '12': 'Acre', '13': 'Amazonas', '14': 'Roraima',
-            '15': 'Pará', '16': 'Amapá', '17': 'Tocantins', '21': 'Maranhão',
-            '22': 'Piauí', '23': 'Ceará', '24': 'Rio Grande do Norte', '25': 'Paraíba',
-            '26': 'Pernambuco', '27': 'Alagoas', '28': 'Sergipe', '29': 'Bahia',
-            '31': 'Minas Gerais', '32': 'Espírito Santo', '33': 'Rio de Janeiro',
-            '35': 'São Paulo', '41': 'Paraná', '42': 'Santa Catarina', '43': 'Rio Grande do Sul',
-            '50': 'Mato Grosso do Sul', '51': 'Mato Grosso', '52': 'Goiás', '53': 'Distrito Federal',
-            # Códigos numéricos também
-            11: 'Rondônia', 12: 'Acre', 13: 'Amazonas', 14: 'Roraima',
-            15: 'Pará', 16: 'Amapá', 17: 'Tocantins', 21: 'Maranhão',
-            22: 'Piauí', 23: 'Ceará', 24: 'Rio Grande do Norte', 25: 'Paraíba',
-            26: 'Pernambuco', 27: 'Alagoas', 28: 'Sergipe', 29: 'Bahia',
-            31: 'Minas Gerais', 32: 'Espírito Santo', 33: 'Rio de Janeiro',
-            35: 'São Paulo', 41: 'Paraná', 42: 'Santa Catarina', 43: 'Rio Grande do Sul',
-            50: 'Mato Grosso do Sul', 51: 'Mato Grosso', 52: 'Goiás', 53: 'Distrito Federal'
-        }
-        
-        # Criar coluna de UF com nomes
-        def map_uf(val):
-            if pd.isna(val):
-                return 'Não informado'
-            # Tentar como string primeiro
-            val_str = str(val).strip()
-            if val_str in uf_dict:
-                return uf_dict[val_str]
-            # Tentar como número
-            try:
-                val_num = int(float(val))
-                if val_num in uf_dict:
-                    return uf_dict[val_num]
-            except:
-                pass
-            # Se não encontrar, retornar o valor original
-            return val_str
-        
-        if 'SG_UF_NOT' in df.columns:
-            df['UF_NOTIFIC'] = df['SG_UF_NOT'].apply(map_uf)
-        elif 'SG_UF' in df.columns:
-            df['UF_NOTIFIC'] = df['SG_UF'].apply(map_uf)
-        else:
-            df['UF_NOTIFIC'] = 'N/A'
-        
-        # Carregar dicionário de municípios
-        municip_dict = load_municipality_dictionary()
-        
-        # Criar coluna de município com nomes
-        def map_municipio(codigo, municip_dict):
-            if pd.isna(codigo):
-                return 'Não informado'
-            codigo_str = str(codigo).strip()
-            # Código de município tem 6 dígitos
-            if len(codigo_str) == 6 and codigo_str in municip_dict:
-                return municip_dict[codigo_str]
-            return codigo_str  # Retornar código se não encontrar nome
-        
-        if 'ID_MUNICIP' in df.columns:
-            df['MUNICIPIO_NOTIFIC'] = df['ID_MUNICIP'].apply(lambda x: map_municipio(x, municip_dict))
-        elif 'ID_MN_RESI' in df.columns:
-            df['MUNICIPIO_NOTIFIC'] = df['ID_MN_RESI'].apply(lambda x: map_municipio(x, municip_dict))
-        else:
-            df['MUNICIPIO_NOTIFIC'] = 'N/A'
-        
-        # Criar coluna de tipo de violência (otimizado)
-        def get_violence_type(row):
-            types = []
-            viol_fisic = str(row.get('VIOL_FISIC', '')).upper() if pd.notna(row.get('VIOL_FISIC')) else ''
-            viol_psico = str(row.get('VIOL_PSICO', '')).upper() if pd.notna(row.get('VIOL_PSICO')) else ''
-            viol_sexu = str(row.get('VIOL_SEXU', '')).upper() if pd.notna(row.get('VIOL_SEXU')) else ''
-            viol_infan = str(row.get('VIOL_INFAN', '')).upper() if pd.notna(row.get('VIOL_INFAN')) else ''
-            
-            if viol_fisic in ['SIM', '1', 'S', '1.0']:
-                types.append('Física')
-            if viol_psico in ['SIM', '1', 'S', '1.0']:
-                types.append('Psicológica')
-            if viol_sexu in ['SIM', '1', 'S', '1.0']:
-                types.append('Sexual')
-            if viol_infan in ['SIM', '1', 'S', '1.0']:
-                types.append('Infantil')
-            if not types:
-                types.append('Não especificado')
-            return ', '.join(types)
-        
-        df['TIPO_VIOLENCIA'] = df.apply(get_violence_type, axis=1)
-        
-        # Criar faixa etária (0-17 anos: 0-1, 2-5, 6-9, 10-13, 14-17)
-        if 'NU_IDADE_N' in df.columns:
-            def get_age_group(age_str):
-                if pd.isna(age_str):
-                    return 'Não informado'
-                age_str = str(age_str).strip()
-                
-                # Extrair número da idade (suporta diferentes formatos)
-                idade_num = None
-                
-                # Verificar se é "menor de 01 ano" ou "menor de 1 ano"
-                if 'menor de' in age_str.lower() or age_str.lower() in ['menor de 01 ano', 'menor de 1 ano']:
-                    return '0-1 anos'
-                
-                # Tentar extrair número da idade (suporta "01 ano", "1 ano", "02 anos", "2 anos", etc.)
-                match = re.search(r'(\d{1,2})\s*ano', age_str, re.IGNORECASE)
-                if match:
-                    idade_num = int(match.group(1))
-                else:
-                    # Tentar verificar diretamente strings conhecidas
-                    if age_str in ['01 ano', '1 ano']:
-                        idade_num = 1
-                    elif age_str in ['02 anos', '2 anos']:
-                        idade_num = 2
-                    elif age_str in ['03 anos', '3 anos']:
-                        idade_num = 3
-                    elif age_str in ['04 anos', '4 anos']:
-                        idade_num = 4
-                    elif age_str in ['05 anos', '5 anos']:
-                        idade_num = 5
-                    elif age_str in ['06 anos', '6 anos']:
-                        idade_num = 6
-                    elif age_str in ['07 anos', '7 anos']:
-                        idade_num = 7
-                    elif age_str in ['08 anos', '8 anos']:
-                        idade_num = 8
-                    elif age_str in ['09 anos', '9 anos']:
-                        idade_num = 9
-                    elif age_str in ['10 anos']:
-                        idade_num = 10
-                    elif age_str in ['11 anos']:
-                        idade_num = 11
-                    elif age_str in ['12 anos']:
-                        idade_num = 12
-                    elif age_str in ['13 anos']:
-                        idade_num = 13
-                    elif age_str in ['14 anos']:
-                        idade_num = 14
-                    elif age_str in ['15 anos']:
-                        idade_num = 15
-                    elif age_str in ['16 anos']:
-                        idade_num = 16
-                    elif age_str in ['17 anos']:
-                        idade_num = 17
-                
-                # Classificar em faixas etárias (0-17 anos)
-                if idade_num is not None:
-                    if idade_num == 0 or idade_num == 1:
-                        return '0-1 anos'
-                    elif 2 <= idade_num <= 5:
-                        return '2-5 anos'
-                    elif 6 <= idade_num <= 9:
-                        return '6-9 anos'
-                    elif 10 <= idade_num <= 13:
-                        return '10-13 anos'
-                    elif 14 <= idade_num <= 17:
-                        return '14-17 anos'
-                
-                return 'Não informado'
-            
-            df['FAIXA_ETARIA'] = df['NU_IDADE_N'].apply(get_age_group)
-        else:
-            df['FAIXA_ETARIA'] = 'Não informado'
-        
-        # Criar coluna de sexo
-        if 'CS_SEXO' in df.columns:
-            def map_sexo(val):
-                if pd.isna(val):
-                    return 'Não informado'
-                val_str = str(val).upper().strip()
-                if val_str in ['M', '1', 'MASCULINO', 'MAS']:
-                    return 'Masculino'
-                elif val_str in ['F', '2', 'FEMININO', 'FEM']:
-                    return 'Feminino'
-                else:
-                    return 'Não informado'
-            df['SEXO'] = df['CS_SEXO'].apply(map_sexo)
-        else:
-            df['SEXO'] = 'Não informado'
-        
-        # Criar coluna de sexo do agressor (corrigir valores misturados)
-        if 'AUTOR_SEXO' in df.columns:
-            def map_autor_sexo(val):
-                if pd.isna(val):
-                    return 'Não informado'
-                val_str = str(val).upper().strip()
-                # Valores válidos de sexo
-                if val_str in ['1', 'M', 'MASCULINO', 'MAS']:
-                    return 'Masculino'
-                elif val_str in ['2', 'F', 'FEMININO', 'FEM']:
-                    return 'Feminino'
-                elif val_str in ['3', 'OUTROS', 'OUTRO']:
-                    return 'Outros'
-                elif val_str in ['9', 'IGNORADO', 'IGN']:
-                    return 'Ignorado'
-                # Se for grau de parentesco (PRIMO, TIO, etc.), considerar como "Não informado"
-                # pois esses valores não deveriam estar nesta coluna
-                else:
-                    return 'Não informado'
-            df['AUTOR_SEXO_CORRIGIDO'] = df['AUTOR_SEXO'].apply(map_autor_sexo)
-        else:
-            df['AUTOR_SEXO_CORRIGIDO'] = 'Não informado'
-        
-        # Criar coluna de relacionamento com agressor (das colunas REL_) com nomes completos
-        # Filtrar apenas colunas de relacionamento pessoal (excluir REL_TRAB, REL_CAT que são sobre trabalho)
-        rel_cols = [col for col in df.columns if col.startswith('REL_') and col not in ['REL_TRAB', 'REL_CAT']]
-        if rel_cols:
-            def get_relacionamento(row):
-                relacionamentos = []
-                for col in rel_cols:
-                    if col in row.index and pd.notna(row[col]):
-                        val = str(row[col]).upper().strip()
-                        if val in ['1', 'SIM', 'S', '1.0']:
-                            # Usar dicionário de relacionamentos para nomes completos
-                            if col in RELACIONAMENTO_DICT:
-                                relacionamento = RELACIONAMENTO_DICT[col]
-                            else:
-                                # Se não estiver no dicionário, tentar criar nome legível
-                                relacionamento = col.replace('REL_', '').replace('_', ' ').title()
-                                # Correções comuns
-                                relacionamento = relacionamento.replace('Exnam', 'Ex-namorado(a)')
-                                relacionamento = relacionamento.replace('Excon', 'Ex-cônjuge')
-                                relacionamento = relacionamento.replace('Conhec', 'Conhecido')
-                                relacionamento = relacionamento.replace('Propri', 'Próprio/Autoagressão')
-                                relacionamento = relacionamento.replace('Cuid', 'Cuidador(a)')
-                                relacionamento = relacionamento.replace('Patrao', 'Patrão/Chefe')
-                                relacionamento = relacionamento.replace('Inst', 'Funcionário de Instituição')
-                            relacionamentos.append(relacionamento)
-                return ', '.join(relacionamentos) if relacionamentos else 'Não informado'
-            df['GRAU_PARENTESCO'] = df.apply(get_relacionamento, axis=1)
-        else:
-            df['GRAU_PARENTESCO'] = 'Não informado'
+        # Aplicar transformações de colunas derivadas
+        df = create_derived_columns(df)
         
         return df, processor
         
@@ -622,6 +359,330 @@ def load_sinan_data(use_duckdb=True, use_preprocessed=True):
         import traceback
         st.error(traceback.format_exc())
         return None, None
+
+def create_derived_columns(df):
+    """
+    Cria todas as colunas derivadas necessárias para o dashboard
+    Esta função é chamada tanto para dados pré-processados quanto para dados processados normalmente
+    """
+    # Função auxiliar para processar datas
+    def process_date_column(df, col_name):
+        """Processa coluna de data no formato YYYYMMDD"""
+        if col_name in df.columns:
+            try:
+                # Primeiro, tentar converter strings vazias ou espaços para None
+                df[col_name] = df[col_name].replace(['', '        ', ' '], None)
+                
+                # Tentar formato YYYYMMDD primeiro (formato mais comum no SINAN)
+                # Converter para string primeiro para garantir formato
+                df[col_name] = df[col_name].astype(str).replace(['nan', 'None', 'NaT'], None)
+                df[col_name] = pd.to_datetime(df[col_name], format='%Y%m%d', errors='coerce')
+            except Exception as e:
+                try:
+                    # Tentar outros formatos
+                    df[col_name] = pd.to_datetime(df[col_name], errors='coerce')
+                except:
+                    # Se falhar, manter como está
+                    pass
+        return df
+    
+    # Processar todas as colunas de data
+    date_columns = ['DT_NOTIFIC', 'DT_OCOR', 'DT_ENCERRA', 'DT_DIGITA', 'DT_INVEST']
+    for col in date_columns:
+        df = process_date_column(df, col)
+    
+    # Extrair ano da data de notificação
+    if 'DT_NOTIFIC' in df.columns:
+        df['ANO_NOTIFIC'] = df['DT_NOTIFIC'].dt.year
+    elif 'NU_ANO' in df.columns:
+        df['ANO_NOTIFIC'] = pd.to_numeric(df['NU_ANO'], errors='coerce')
+    else:
+        df['ANO_NOTIFIC'] = None
+    
+    # Calcular tempo entre ocorrência e denúncia (em dias)
+    if 'DT_OCOR' in df.columns and 'DT_NOTIFIC' in df.columns:
+        # Verificar se ambas as datas são válidas antes de calcular
+        mask_validas = df['DT_NOTIFIC'].notna() & df['DT_OCOR'].notna()
+        df['TEMPO_OCOR_DENUNCIA'] = None
+        if mask_validas.any():
+            # Calcular diferença apenas para registros com ambas as datas válidas
+            df.loc[mask_validas, 'TEMPO_OCOR_DENUNCIA'] = (
+                df.loc[mask_validas, 'DT_NOTIFIC'] - df.loc[mask_validas, 'DT_OCOR']
+            ).dt.days
+            # Filtrar valores inválidos (negativos ou muito grandes)
+            df.loc[mask_validas, 'TEMPO_OCOR_DENUNCIA'] = df.loc[mask_validas, 'TEMPO_OCOR_DENUNCIA'].apply(
+                lambda x: x if pd.notna(x) and 0 <= x <= 3650 else None  # Máximo 10 anos
+            )
+    
+    # Processar coluna de evolução (status do caso)
+    # NOTA: Esta funcionalidade foi desabilitada porque os dados não trazem informação útil
+    # 99.99% dos registros têm EVOLUCAO vazia, tornando esta análise irrelevante
+    # A coluna STATUS_CASO não será criada para economizar processamento
+    # Se necessário no futuro, pode ser reativada quando os dados tiverem mais informações
+    # 
+    # Código comentado (pode ser reativado no futuro):
+    # def determinar_status_caso(row):
+    #     """Determina o status do caso baseado em EVOLUCAO e DT_ENCERRA"""
+    #     # ... código da função ...
+    # if 'EVOLUCAO' in df.columns or 'DT_ENCERRA' in df.columns:
+    #     df['STATUS_CASO'] = df.apply(determinar_status_caso, axis=1)
+    # else:
+    #     df['STATUS_CASO'] = 'Não informado'
+    
+    # Processar encaminhamentos para justiça
+    encaminhamento_cols = ['ENC_DELEG', 'ENC_DPCA', 'ENC_MPU', 'ENC_VARA']
+    if any(col in df.columns for col in encaminhamento_cols):
+        def get_encaminhamentos_justica(row):
+            encaminhamentos = []
+            for col in encaminhamento_cols:
+                if col in row.index and pd.notna(row[col]):
+                    val = str(row[col]).upper().strip()
+                    # Verificar se é '1', 'SIM', 'S', '1.0' ou se é numérico e igual a 1
+                    if val in ['1', 'SIM', 'S', '1.0'] or (val.isdigit() and int(val) == 1):
+                        if col == 'ENC_DELEG':
+                            encaminhamentos.append('Delegacia')
+                        elif col == 'ENC_DPCA':
+                            encaminhamentos.append('DPCA')
+                        elif col == 'ENC_MPU':
+                            encaminhamentos.append('Ministério Público')
+                        elif col == 'ENC_VARA':
+                            encaminhamentos.append('Vara da Infância')
+            return ', '.join(encaminhamentos) if encaminhamentos else 'Nenhum'
+        
+        df['ENCAMINHAMENTOS_JUSTICA'] = df.apply(get_encaminhamentos_justica, axis=1)
+    else:
+        df['ENCAMINHAMENTOS_JUSTICA'] = 'Não informado'
+    
+    # Dicionário de códigos IBGE para nomes de estados
+    uf_dict = {
+        '11': 'Rondônia', '12': 'Acre', '13': 'Amazonas', '14': 'Roraima',
+        '15': 'Pará', '16': 'Amapá', '17': 'Tocantins', '21': 'Maranhão',
+        '22': 'Piauí', '23': 'Ceará', '24': 'Rio Grande do Norte', '25': 'Paraíba',
+        '26': 'Pernambuco', '27': 'Alagoas', '28': 'Sergipe', '29': 'Bahia',
+        '31': 'Minas Gerais', '32': 'Espírito Santo', '33': 'Rio de Janeiro',
+        '35': 'São Paulo', '41': 'Paraná', '42': 'Santa Catarina', '43': 'Rio Grande do Sul',
+        '50': 'Mato Grosso do Sul', '51': 'Mato Grosso', '52': 'Goiás', '53': 'Distrito Federal',
+        # Códigos numéricos também
+        11: 'Rondônia', 12: 'Acre', 13: 'Amazonas', 14: 'Roraima',
+        15: 'Pará', 16: 'Amapá', 17: 'Tocantins', 21: 'Maranhão',
+        22: 'Piauí', 23: 'Ceará', 24: 'Rio Grande do Norte', 25: 'Paraíba',
+        26: 'Pernambuco', 27: 'Alagoas', 28: 'Sergipe', 29: 'Bahia',
+        31: 'Minas Gerais', 32: 'Espírito Santo', 33: 'Rio de Janeiro',
+        35: 'São Paulo', 41: 'Paraná', 42: 'Santa Catarina', 43: 'Rio Grande do Sul',
+        50: 'Mato Grosso do Sul', 51: 'Mato Grosso', 52: 'Goiás', 53: 'Distrito Federal'
+    }
+    
+    # Criar coluna de UF com nomes
+    def map_uf(val):
+        if pd.isna(val):
+            return 'Não informado'
+        # Tentar como string primeiro
+        val_str = str(val).strip()
+        if val_str in uf_dict:
+            return uf_dict[val_str]
+        # Tentar como número
+        try:
+            val_num = int(float(val))
+            if val_num in uf_dict:
+                return uf_dict[val_num]
+        except:
+            pass
+        # Se não encontrar, retornar o valor original
+        return val_str
+    
+    if 'SG_UF_NOT' in df.columns:
+        df['UF_NOTIFIC'] = df['SG_UF_NOT'].apply(map_uf)
+    elif 'SG_UF' in df.columns:
+        df['UF_NOTIFIC'] = df['SG_UF'].apply(map_uf)
+    else:
+        df['UF_NOTIFIC'] = 'N/A'
+    
+    # Carregar dicionário de municípios
+    municip_dict = load_municipality_dictionary()
+    
+    # Criar coluna de município com nomes
+    def map_municipio(codigo, municip_dict):
+        if pd.isna(codigo):
+            return 'Não informado'
+        codigo_str = str(codigo).strip()
+        # Código de município tem 6 dígitos
+        if len(codigo_str) == 6 and codigo_str in municip_dict:
+            return municip_dict[codigo_str]
+        return codigo_str  # Retornar código se não encontrar nome
+    
+    if 'ID_MUNICIP' in df.columns:
+        df['MUNICIPIO_NOTIFIC'] = df['ID_MUNICIP'].apply(lambda x: map_municipio(x, municip_dict))
+    elif 'ID_MN_RESI' in df.columns:
+        df['MUNICIPIO_NOTIFIC'] = df['ID_MN_RESI'].apply(lambda x: map_municipio(x, municip_dict))
+    else:
+        df['MUNICIPIO_NOTIFIC'] = 'N/A'
+    
+    # Criar coluna de tipo de violência (otimizado)
+    def get_violence_type(row):
+        types = []
+        viol_fisic = str(row.get('VIOL_FISIC', '')).upper() if pd.notna(row.get('VIOL_FISIC')) else ''
+        viol_psico = str(row.get('VIOL_PSICO', '')).upper() if pd.notna(row.get('VIOL_PSICO')) else ''
+        viol_sexu = str(row.get('VIOL_SEXU', '')).upper() if pd.notna(row.get('VIOL_SEXU')) else ''
+        viol_infan = str(row.get('VIOL_INFAN', '')).upper() if pd.notna(row.get('VIOL_INFAN')) else ''
+        
+        if viol_fisic in ['SIM', '1', 'S', '1.0']:
+            types.append('Física')
+        if viol_psico in ['SIM', '1', 'S', '1.0']:
+            types.append('Psicológica')
+        if viol_sexu in ['SIM', '1', 'S', '1.0']:
+            types.append('Sexual')
+        if viol_infan in ['SIM', '1', 'S', '1.0']:
+            types.append('Infantil')
+        if not types:
+            types.append('Não especificado')
+        return ', '.join(types)
+    
+    df['TIPO_VIOLENCIA'] = df.apply(get_violence_type, axis=1)
+    
+    # Criar faixa etária (0-17 anos: 0-1, 2-5, 6-9, 10-13, 14-17)
+    if 'NU_IDADE_N' in df.columns:
+        def get_age_group(age_str):
+            if pd.isna(age_str):
+                return 'Não informado'
+            age_str = str(age_str).strip()
+            
+            # Extrair número da idade (suporta diferentes formatos)
+            idade_num = None
+            
+            # Verificar se é "menor de 01 ano" ou "menor de 1 ano"
+            if 'menor de' in age_str.lower() or age_str.lower() in ['menor de 01 ano', 'menor de 1 ano']:
+                return '0-1 anos'
+            
+            # Tentar extrair número da idade (suporta "01 ano", "1 ano", "02 anos", "2 anos", etc.)
+            match = re.search(r'(\d{1,2})\s*ano', age_str, re.IGNORECASE)
+            if match:
+                idade_num = int(match.group(1))
+            else:
+                # Tentar verificar diretamente strings conhecidas
+                if age_str in ['01 ano', '1 ano']:
+                    idade_num = 1
+                elif age_str in ['02 anos', '2 anos']:
+                    idade_num = 2
+                elif age_str in ['03 anos', '3 anos']:
+                    idade_num = 3
+                elif age_str in ['04 anos', '4 anos']:
+                    idade_num = 4
+                elif age_str in ['05 anos', '5 anos']:
+                    idade_num = 5
+                elif age_str in ['06 anos', '6 anos']:
+                    idade_num = 6
+                elif age_str in ['07 anos', '7 anos']:
+                    idade_num = 7
+                elif age_str in ['08 anos', '8 anos']:
+                    idade_num = 8
+                elif age_str in ['09 anos', '9 anos']:
+                    idade_num = 9
+                elif age_str in ['10 anos']:
+                    idade_num = 10
+                elif age_str in ['11 anos']:
+                    idade_num = 11
+                elif age_str in ['12 anos']:
+                    idade_num = 12
+                elif age_str in ['13 anos']:
+                    idade_num = 13
+                elif age_str in ['14 anos']:
+                    idade_num = 14
+                elif age_str in ['15 anos']:
+                    idade_num = 15
+                elif age_str in ['16 anos']:
+                    idade_num = 16
+                elif age_str in ['17 anos']:
+                    idade_num = 17
+            
+            # Classificar em faixas etárias (0-17 anos)
+            if idade_num is not None:
+                if idade_num == 0 or idade_num == 1:
+                    return '0-1 anos'
+                elif 2 <= idade_num <= 5:
+                    return '2-5 anos'
+                elif 6 <= idade_num <= 9:
+                    return '6-9 anos'
+                elif 10 <= idade_num <= 13:
+                    return '10-13 anos'
+                elif 14 <= idade_num <= 17:
+                    return '14-17 anos'
+            
+            return 'Não informado'
+        
+        df['FAIXA_ETARIA'] = df['NU_IDADE_N'].apply(get_age_group)
+    else:
+        df['FAIXA_ETARIA'] = 'Não informado'
+    
+    # Criar coluna de sexo
+    if 'CS_SEXO' in df.columns:
+        def map_sexo(val):
+            if pd.isna(val):
+                return 'Não informado'
+            val_str = str(val).upper().strip()
+            if val_str in ['M', '1', 'MASCULINO', 'MAS']:
+                return 'Masculino'
+            elif val_str in ['F', '2', 'FEMININO', 'FEM']:
+                return 'Feminino'
+            else:
+                return 'Não informado'
+        df['SEXO'] = df['CS_SEXO'].apply(map_sexo)
+    else:
+        df['SEXO'] = 'Não informado'
+    
+    # Criar coluna de sexo do agressor (corrigir valores misturados)
+    if 'AUTOR_SEXO' in df.columns:
+        def map_autor_sexo(val):
+            if pd.isna(val):
+                return 'Não informado'
+            val_str = str(val).upper().strip()
+            # Valores válidos de sexo
+            if val_str in ['1', 'M', 'MASCULINO', 'MAS']:
+                return 'Masculino'
+            elif val_str in ['2', 'F', 'FEMININO', 'FEM']:
+                return 'Feminino'
+            elif val_str in ['3', 'OUTROS', 'OUTRO']:
+                return 'Outros'
+            elif val_str in ['9', 'IGNORADO', 'IGN']:
+                return 'Ignorado'
+            # Se for grau de parentesco (PRIMO, TIO, etc.), considerar como "Não informado"
+            # pois esses valores não deveriam estar nesta coluna
+            else:
+                return 'Não informado'
+        df['AUTOR_SEXO_CORRIGIDO'] = df['AUTOR_SEXO'].apply(map_autor_sexo)
+    else:
+        df['AUTOR_SEXO_CORRIGIDO'] = 'Não informado'
+    
+    # Criar coluna de relacionamento com agressor (das colunas REL_) com nomes completos
+    # Filtrar apenas colunas de relacionamento pessoal (excluir REL_TRAB, REL_CAT que são sobre trabalho)
+    rel_cols = [col for col in df.columns if col.startswith('REL_') and col not in ['REL_TRAB', 'REL_CAT']]
+    if rel_cols:
+        def get_relacionamento(row):
+            relacionamentos = []
+            for col in rel_cols:
+                if col in row.index and pd.notna(row[col]):
+                    val = str(row[col]).upper().strip()
+                    if val in ['1', 'SIM', 'S', '1.0']:
+                        # Usar dicionário de relacionamentos para nomes completos
+                        if col in RELACIONAMENTO_DICT:
+                            relacionamento = RELACIONAMENTO_DICT[col]
+                        else:
+                            # Se não estiver no dicionário, tentar criar nome legível
+                            relacionamento = col.replace('REL_', '').replace('_', ' ').title()
+                            # Correções comuns
+                            relacionamento = relacionamento.replace('Exnam', 'Ex-namorado(a)')
+                            relacionamento = relacionamento.replace('Excon', 'Ex-cônjuge')
+                            relacionamento = relacionamento.replace('Conhec', 'Conhecido')
+                            relacionamento = relacionamento.replace('Propri', 'Próprio/Autoagressão')
+                            relacionamento = relacionamento.replace('Cuid', 'Cuidador(a)')
+                            relacionamento = relacionamento.replace('Patrao', 'Patrão/Chefe')
+                            relacionamento = relacionamento.replace('Inst', 'Funcionário de Instituição')
+                        relacionamentos.append(relacionamento)
+            return ', '.join(relacionamentos) if relacionamentos else 'Não informado'
+        df['GRAU_PARENTESCO'] = df.apply(get_relacionamento, axis=1)
+    else:
+        df['GRAU_PARENTESCO'] = 'Não informado'
+    
+    return df
 
 # Carregar dados
 with st.spinner("Carregando dados do SINAN..."):
@@ -968,6 +1029,7 @@ else:
     if 'FAIXA_ETARIA' in df_filtrado.columns and 'SEXO' in df_filtrado.columns:
         # Garantir que apenas faixas etárias de 0-17 anos sejam incluídas
         faixas_validas = ['0-1 anos', '2-5 anos', '6-9 anos', '10-13 anos', '14-17 anos']
+        
         # Filtrar apenas registros com faixas válidas e sexo válido
         df_demografia = df_filtrado[
             (df_filtrado['FAIXA_ETARIA'].isin(faixas_validas)) & 
@@ -982,6 +1044,14 @@ else:
             ordem_faixas = {faixa: idx for idx, faixa in enumerate(faixas_validas)}
             df_demografia['ordem'] = df_demografia['FAIXA_ETARIA'].map(ordem_faixas)
             df_demografia = df_demografia.sort_values('ordem').drop('ordem', axis=1)
+            
+            # Garantir que todas as faixas apareçam no gráfico, mesmo com 0 registros
+            # Criar DataFrame completo com todas as combinações
+            import itertools
+            todas_combinacoes = list(itertools.product(faixas_validas, df_demografia['SEXO'].unique()))
+            df_completo = pd.DataFrame(todas_combinacoes, columns=['FAIXA_ETARIA', 'SEXO'])
+            df_demografia = df_completo.merge(df_demografia, on=['FAIXA_ETARIA', 'SEXO'], how='left')
+            df_demografia['Contagem'] = df_demografia['Contagem'].fillna(0).astype(int)
             
             fig_bar_grouped = px.bar(
                 df_demografia, 
