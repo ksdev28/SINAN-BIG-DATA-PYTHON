@@ -63,7 +63,6 @@ python scripts/preprocess_data.py
 ```
 
 **Benefícios:**
-
 - ⚡ Carregamento muito mais rápido do dashboard
 - 💾 Dados já processados e otimizados
 - 🎯 Ideal para compartilhar o projeto (dados já prontos)
@@ -73,13 +72,16 @@ python scripts/preprocess_data.py
 ### 3. Executar o Dashboard
 
 **Opção 1: Usando o script (Recomendado)**
-
+```bash
+# Windows (duplo clique ou execute no terminal)
+run_dashboard.bat
+# Ou PowerShell:
+.\run_dashboard.ps1
 # Ou Python (funciona em qualquer OS):
 python run_dashboard.py
 ```
 
 **Opção 2: Comando direto**
-
 ```bash
 # A partir da raiz do projeto
 streamlit run src/dashboard_sinan_real_data.py
@@ -131,3 +133,4 @@ python -m jupyterlab
 2. Adicione documentação para novas funcionalidades
 3. Use os scripts em `scripts/` para análises temporárias
 4. Mantenha notebooks em `notebooks/` para análises exploratórias
+

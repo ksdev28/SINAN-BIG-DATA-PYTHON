@@ -30,7 +30,7 @@ class SINANDataProcessorComprehensive:
         """
         Carrega dicionários básicos para decodificação
         """
-        print("📚 Carregando dicionários básicos...")
+        print("[INFO] Carregando dicionarios basicos...")
         
         # Dicionários básicos para decodificação
         self.dictionaries = {
@@ -75,16 +75,16 @@ class SINANDataProcessorComprehensive:
         age_mapping['4000'] = 'menor de 01 ano'
         self.dictionaries['NU_IDADE_N'] = age_mapping
         
-        print(f"✅ {len(self.dictionaries)} dicionários carregados")
+        print(f"[OK] {len(self.dictionaries)} dicionarios carregados")
         
     def load_violence_data(self):
         """
         Carrega dados de violência de todos os arquivos Parquet
         """
-        print("📊 Carregando dados de violência...")
+        print("[INFO] Carregando dados de violencia...")
         
         parquet_files = list(self.violence_data_path.glob("*.parquet"))
-        print(f"   📁 Encontrados {len(parquet_files)} arquivos")
+        print(f"   [INFO] Encontrados {len(parquet_files)} arquivos")
         
         all_data = []
         
@@ -92,15 +92,15 @@ class SINANDataProcessorComprehensive:
             try:
                 df = pd.read_parquet(file_path)
                 all_data.append(df)
-                print(f"   ✅ {file_path.name}: {len(df):,} registros")
+                print(f"   [OK] {file_path.name}: {len(df):,} registros")
             except Exception as e:
-                print(f"   ⚠️ Erro ao carregar {file_path.name}: {e}")
+                print(f"   [ERRO] Erro ao carregar {file_path.name}: {e}")
         
         if all_data:
             self.violence_data = pd.concat(all_data, ignore_index=True)
-            print(f"✅ Total de registros carregados: {len(self.violence_data):,}")
+            print(f"[OK] Total de registros carregados: {len(self.violence_data):,}")
         else:
-            print("❌ Nenhum dado carregado")
+            print("[ERRO] Nenhum dado carregado")
             
         return self.violence_data
     
@@ -108,7 +108,7 @@ class SINANDataProcessorComprehensive:
         """
         Aplica todos os dicionários aos dados (otimizado para grandes volumes)
         """
-        print("🔄 Aplicando dicionários...")
+        print("[INFO] Aplicando dicionarios...")
         
         # Se não especificar colunas, usar todas as disponíveis
         if columns_to_decode is None:
@@ -142,7 +142,7 @@ class SINANDataProcessorComprehensive:
         # Aplicar dicionários apenas nas colunas que existem e precisam ser decodificadas
         for column, dict_name in column_mappings.items():
             if column in decoded_data.columns and dict_name in self.dictionaries:
-                print(f"   🔄 Aplicando {dict_name} em {column}")
+                print(f"   [INFO] Aplicando {dict_name} em {column}")
                 # Usar map com fillna para manter valores não mapeados
                 dict_map = self.dictionaries[dict_name]
                 # Converter para string e aplicar mapeamento
@@ -154,10 +154,10 @@ class SINANDataProcessorComprehensive:
         rel_dict = {'1': 'Sim', '2': 'Não', '9': 'Ignorado', '': 'Branco'}
         for col in rel_columns[:5]:  # Limitar a 5 colunas para não sobrecarregar
             if col in decoded_data.columns:
-                print(f"   🔄 Aplicando dicionário em {col}")
+                print(f"   [INFO] Aplicando dicionario em {col}")
                 decoded_data[col] = decoded_data[col].astype(str).replace(rel_dict)
         
-        print("✅ Dicionários aplicados")
+        print("[OK] Dicionarios aplicados")
         return decoded_data
     
     def filter_comprehensive_violence(self, data, already_filtered_by_age=False):
@@ -168,7 +168,7 @@ class SINANDataProcessorComprehensive:
             data: DataFrame com os dados
             already_filtered_by_age: Se True, assume que os dados já foram filtrados por idade
         """
-        print("🔍 Filtrando violência contra crianças e adolescentes...")
+        print("[INFO] Filtrando violencia contra criancas e adolescentes...")
         
         original_count = len(data)
         
@@ -186,12 +186,12 @@ class SINANDataProcessorComprehensive:
             
             # Filtrar por idade
             if 'NU_IDADE_N' in data.columns:
-                print("   👶 Filtrando por idade (0-17 anos)...")
+                print("   [INFO] Filtrando por idade (0-17 anos)...")
                 age_filter = data['NU_IDADE_N'].isin(child_ages)
                 child_data = data[age_filter]
-                print(f"   ✅ Casos de 0-17 anos: {len(child_data):,}")
+                print(f"   [OK] Casos de 0-17 anos: {len(child_data):,}")
             else:
-                print("   ⚠️ Coluna NU_IDADE_N não encontrada")
+                print("   [AVISO] Coluna NU_IDADE_N nao encontrada")
                 child_data = data
         
         # Filtrar por todos os tipos de violência
@@ -200,7 +200,7 @@ class SINANDataProcessorComprehensive:
         available_violence_cols = [col for col in violence_columns if col in child_data.columns]
         
         if available_violence_cols:
-            print(f"   🚨 Filtrando por violência: {available_violence_cols}")
+            print(f"   [INFO] Filtrando por violencia: {available_violence_cols}")
             
             # Valores que indicam violência: '1', 'Sim', 'SIM', 'S', 'sim', 1 (numérico)
             violence_values = ['1', 'Sim', 'SIM', 'S', 'sim', '1.0']
@@ -235,22 +235,22 @@ class SINANDataProcessorComprehensive:
                 else:
                     count_num = 0
                 count = max(count_str, count_num)
-                print(f"   📊 {col}: {count:,} casos")
+                print(f"   [INFO] {col}: {count:,} casos")
             
             filtered_count = len(violence_data)
-            print(f"   ✅ Casos de violência infantil: {filtered_count:,}")
+            print(f"   [OK] Casos de violencia infantil: {filtered_count:,}")
             
         else:
-            print("   ⚠️ Nenhuma coluna de violência encontrada")
+            print("   [AVISO] Nenhuma coluna de violencia encontrada")
             violence_data = child_data
             filtered_count = len(violence_data)
         
         # Evitar divisão por zero
         if original_count > 0:
             percentage = (filtered_count/original_count*100)
-            print(f"✅ Filtrado: {filtered_count:,} casos de {original_count:,} ({percentage:.1f}%)")
+            print(f"[OK] Filtrado: {filtered_count:,} casos de {original_count:,} ({percentage:.1f}%)")
         else:
-            print(f"✅ Filtrado: {filtered_count:,} casos (dados já filtrados anteriormente)")
+            print(f"[OK] Filtrado: {filtered_count:,} casos (dados ja filtrados anteriormente)")
         
         return violence_data
     
@@ -265,7 +265,7 @@ class SINANDataProcessorComprehensive:
             DataFrame com coluna FAIXA_ETARIA adicionada
         """
         if 'NU_IDADE_N' not in data.columns:
-            print("   ⚠️ Coluna NU_IDADE_N não encontrada para criar FAIXA_ETARIA")
+            print("   [AVISO] Coluna NU_IDADE_N nao encontrada para criar FAIXA_ETARIA")
             return data
         
         def map_idade_to_faixa(idade_str):
@@ -338,8 +338,8 @@ class SINANDataProcessorComprehensive:
         data = data.copy()
         data['FAIXA_ETARIA'] = data['NU_IDADE_N'].apply(map_idade_to_faixa)
         
-        print(f"   ✅ Coluna FAIXA_ETARIA criada")
-        print(f"   📊 Distribuição: {data['FAIXA_ETARIA'].value_counts().to_dict()}")
+        print(f"   [OK] Coluna FAIXA_ETARIA criada")
+        print(f"   [INFO] Distribuicao: {data['FAIXA_ETARIA'].value_counts().to_dict()}")
         
         return data
     
@@ -347,7 +347,7 @@ class SINANDataProcessorComprehensive:
         """
         Carrega dados populacionais
         """
-        print("👥 Carregando dados populacionais...")
+        print("[INFO] Carregando dados populacionais...")
         
         try:
             parquet_files = list(self.population_data_path.glob("*.parquet"))
@@ -358,13 +358,13 @@ class SINANDataProcessorComprehensive:
                     all_data.append(df)
                 
                 self.population_data = pd.concat(all_data, ignore_index=True)
-                print(f"✅ Dados populacionais carregados: {len(self.population_data):,} registros")
+                print(f"[OK] Dados populacionais carregados: {len(self.population_data):,} registros")
             else:
-                print("⚠️ Nenhum arquivo populacional encontrado")
+                print("[AVISO] Nenhum arquivo populacional encontrado")
                 self.population_data = None
                 
         except Exception as e:
-            print(f"❌ Erro ao carregar dados populacionais: {e}")
+            print(f"[ERRO] Erro ao carregar dados populacionais: {e}")
             self.population_data = None
             
         return self.population_data
@@ -373,7 +373,7 @@ class SINANDataProcessorComprehensive:
         """
         Gera estatísticas completas incluindo análises socioeconômicas
         """
-        print("📊 Gerando estatísticas completas...")
+        print("[INFO] Gerando estatisticas completas...")
         
         stats = {
             'total_cases': len(data),
@@ -442,14 +442,14 @@ class SINANDataProcessorComprehensive:
         if 'REDE_EDUCA' in data.columns:
             stats['access_services']['education'] = data['REDE_EDUCA'].value_counts().to_dict()
         
-        print("✅ Estatísticas geradas")
+        print("[OK] Estatisticas geradas")
         return stats
     
     def process_all_data(self):
         """
         Processa todos os dados de forma completa
         """
-        print("🚀 Iniciando processamento completo...")
+        print("[INFO] Iniciando processamento completo...")
         start_time = time.time()
         
         # 1. Carregar dicionários
@@ -476,8 +476,8 @@ class SINANDataProcessorComprehensive:
         end_time = time.time()
         processing_time = end_time - start_time
         
-        print(f"✅ Processamento completo finalizado em {processing_time:.2f} segundos")
-        print(f"📊 Dados processados: {len(child_data):,} casos")
+        print(f"[OK] Processamento completo finalizado em {processing_time:.2f} segundos")
+        print(f"[INFO] Dados processados: {len(child_data):,} casos")
         
         return child_data, population_data, stats
     
@@ -537,5 +537,5 @@ if __name__ == "__main__":
     
     # Mostrar resumo
     summary = processor.get_analysis_summary()
-    print("\n📊 RESUMO DA ANÁLISE:")
+    print("\n[INFO] RESUMO DA ANALISE:")
     print(json.dumps(summary, indent=2, ensure_ascii=False))
