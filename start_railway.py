@@ -72,11 +72,18 @@ def main():
         print("[OK] Usando dados do Git. Preprocessamento não necessário.")
         print()
     
-    # Obter porta do Railway (ou usar padrão 8501)
-    port = os.environ.get("PORT", "8501")
+    # Obter porta do Railway (obrigatório - Railway define via variável de ambiente)
+    port = os.environ.get("PORT")
+    
+    if not port:
+        print("[ERRO] Variável de ambiente PORT não definida!")
+        print("[ERRO] O Railway deve definir PORT automaticamente.")
+        print("[INFO] Tentando usar porta padrão 8501...")
+        port = "8501"
     
     print("[INFO] Iniciando dashboard Streamlit...")
     print(f"[INFO] Porta: {port}")
+    print(f"[INFO] Variáveis de ambiente: PORT={port}")
     print()
     
     # Caminho do dashboard
@@ -84,26 +91,56 @@ def main():
     
     if not dashboard_path.exists():
         print(f"[ERRO] Dashboard não encontrado: {dashboard_path}")
+        print(f"[INFO] Diretório atual: {Path.cwd()}")
+        print(f"[INFO] Arquivos no diretório: {list(Path('.').glob('*'))}")
         sys.exit(1)
+    
+    # Verificar se o arquivo de configuração do Streamlit existe
+    streamlit_config = Path(".streamlit/config.toml")
+    if streamlit_config.exists():
+        print(f"[OK] Configuração do Streamlit encontrada: {streamlit_config}")
+    else:
+        print(f"[AVISO] Configuração do Streamlit não encontrada (opcional)")
+    
+    print()
+    print("[INFO] Executando Streamlit...")
+    print(f"[INFO] Comando: streamlit run {dashboard_path} --server.port {port} --server.address 0.0.0.0")
+    print()
     
     try:
         # Executar Streamlit
         # Railway expõe a porta via variável de ambiente PORT
-        # Usar os.environ para passar variáveis de ambiente ao Streamlit
+        # IMPORTANTE: Streamlit deve escutar em 0.0.0.0 para aceitar conexões externas
         env = os.environ.copy()
+        env["PORT"] = str(port)  # Garantir que PORT está definida
         
-        subprocess.run([
+        # Usar subprocess.run sem check para capturar erros
+        process = subprocess.Popen([
             sys.executable, "-m", "streamlit", "run",
             str(dashboard_path),
             "--server.port", str(port),
             "--server.address", "0.0.0.0",
             "--server.headless", "true",
-            "--browser.gatherUsageStats", "false"
-        ], env=env)
+            "--browser.gatherUsageStats", "false",
+            "--server.enableCORS", "false",
+            "--server.enableXsrfProtection", "false"
+        ], env=env, stdout=sys.stdout, stderr=sys.stderr)
+        
+        print(f"[OK] Streamlit iniciado com PID: {process.pid}")
+        print(f"[OK] Dashboard disponível em: http://0.0.0.0:{port}")
+        print()
+        
+        # Aguardar o processo terminar
+        process.wait()
+        
     except KeyboardInterrupt:
-        print("\n\nDashboard encerrado.")
+        print("\n\n[INFO] Dashboard encerrado pelo usuário.")
+        if 'process' in locals():
+            process.terminate()
     except Exception as e:
         print(f"\n[ERRO] Erro ao executar dashboard: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 if __name__ == "__main__":

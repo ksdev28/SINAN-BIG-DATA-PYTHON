@@ -35,8 +35,9 @@ env/
 # Jupyter Notebook
 .ipynb_checkpoints
 
-# Streamlit
-.streamlit/
+# Streamlit (manter config.toml mas ignorar cache)
+.streamlit/cache/
+.streamlit/secrets.toml
 
 # Data (manter estrutura mas não versionar dados grandes)
 data/raw/*.parquet
