@@ -1,0 +1,45 @@
+# Arquivos e pastas a ignorar no Railway
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Ambientes virtuais
+venv/
+env/
+ENV/
+
+# Jupyter Notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Dados processados (serão gerados no Railway)
+data/processed/*.parquet
+data/processed/*.json
+
+# Documentação
+docs/
+*.pdf
+*.md
+!README.md
+
+# Relatórios
+reports/
+*.txt
+!requirements.txt
+
+# Outros
+.DS_Store
+*.log
+.git/
+.gitignore
+
