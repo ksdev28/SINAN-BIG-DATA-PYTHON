@@ -85,9 +85,17 @@ O projeto precisa de:
 
 ## 📝 Notas Importantes
 
-1. **Dados no Repositório**: 
+1. **Dados Processados no Git (RECOMENDADO)**: 
+   - ✅ **SOLUÇÃO IDEAL**: Faça commit dos dados processados (`data/processed/sinan_data_processed.parquet`)
+   - Os dados processados são ~38MB (muito menores que os brutos)
+   - Evita problemas de memória no Railway
+   - Não precisa dos dados brutos se tiver os processados
+   - O `.gitignore` foi configurado para permitir dados processados
+   
+2. **Dados Brutos**:
    - Se os dados brutos são grandes (>100MB), considere usar Railway Volumes
-   - Ou faça upload dos dados pré-processados diretamente
+   - **NÃO é necessário** se você já tiver os dados processados no Git
+   - Apenas necessário se quiser reprocessar os dados
 
 2. **Cache do Streamlit**:
    - O Streamlit usa cache para acelerar carregamentos

@@ -21,9 +21,21 @@ def main():
     processed_file = Path("data/processed/sinan_data_processed.parquet")
     
     if not processed_file.exists():
-        print("[INFO] Dados pré-processados não encontrados.")
-        print("[INFO] Executando preprocessamento...")
+        print("[AVISO] Dados pré-processados não encontrados.")
+        print("[AVISO] O preprocessamento requer muita memória (~4GB+).")
+        print("[AVISO] Recomendado: Faça commit dos dados processados no Git.")
         print()
+        print("[INFO] Tentando executar preprocessamento...")
+        print("[INFO] Isso pode falhar por falta de memória no Railway.")
+        print()
+        
+        # Verificar se os dados brutos existem
+        raw_data_dir = Path("data/raw/VIOLBR-PARQUET")
+        if not raw_data_dir.exists() or not list(raw_data_dir.glob("*.parquet")):
+            print("[ERRO] Dados brutos não encontrados em data/raw/VIOLBR-PARQUET/")
+            print("[ERRO] Não é possível fazer preprocessamento sem dados brutos.")
+            print("[ERRO] Solução: Faça commit dos dados processados no Git.")
+            sys.exit(1)
         
         try:
             # Executar preprocessamento
@@ -49,12 +61,15 @@ def main():
                 
         except subprocess.CalledProcessError as e:
             print(f"[ERRO] Erro ao executar preprocessamento: {e}")
+            print("[ERRO] Provavelmente falta de memória.")
+            print("[SOLUÇÃO] Faça commit dos dados processados no Git e faça deploy novamente.")
             sys.exit(1)
         except FileNotFoundError:
             print("[ERRO] Script de preprocessamento não encontrado")
             sys.exit(1)
     else:
-        print("[OK] Dados pré-processados já existem. Pulando preprocessamento.")
+        print("[OK] Dados pré-processados encontrados!")
+        print("[OK] Usando dados do Git. Preprocessamento não necessário.")
         print()
     
     # Obter porta do Railway (ou usar padrão 8501)

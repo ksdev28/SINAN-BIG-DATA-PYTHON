@@ -44,8 +44,9 @@ data/raw/*.db
 data/raw/*.csv
 
 # Dados processados (gerados localmente)
-data/processed/*.parquet
-data/processed/*.json
+# COMENTADO: Permitir dados processados no Git para Railway
+# data/processed/*.parquet
+# data/processed/*.json
 
 # Reports temporários
 reports/*.txt
