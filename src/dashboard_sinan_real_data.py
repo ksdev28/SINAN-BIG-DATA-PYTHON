@@ -698,116 +698,12 @@ if df is None or len(df) == 0:
     st.error("Não foi possível carregar os dados. Verifique se os arquivos parquet estão disponíveis.")
     st.stop()
 
-# Seção de Diagnóstico (expandível)
-with st.expander("🔍 Diagnóstico: Verificação de Dados e Filtragem", expanded=False):
-    st.markdown("### Verificação de Dados e Filtragem")
-    
-    # Estatísticas gerais
-    col_diag1, col_diag2, col_diag3 = st.columns(3)
-    with col_diag1:
-        st.metric("Total de Registros", formatar_numero_br(len(df)))
-    with col_diag2:
-        if 'DT_NOTIFIC' in df.columns:
-            registros_com_data = df['DT_NOTIFIC'].notna().sum()
-            st.metric("Registros com Data", formatar_numero_br(registros_com_data))
-    with col_diag3:
-        if 'DT_OCOR' in df.columns:
-            registros_com_ocor = df['DT_OCOR'].notna().sum()
-            st.metric("Registros com Data Ocorrência", formatar_numero_br(registros_com_ocor))
-    
-    # Verificar colunas importantes
-    st.markdown("#### Colunas Importantes Disponíveis:")
-    colunas_importantes = {
-        'DT_NOTIFIC': 'Data de Notificação',
-        'DT_OCOR': 'Data de Ocorrência',
-        'DT_ENCERRA': 'Data de Encerramento',
-        'EVOLUCAO': 'Evolução do Caso',
-        'ENC_DELEG': 'Encaminhamento Delegacia',
-        'ENC_DPCA': 'Encaminhamento DPCA',
-        'ENC_MPU': 'Encaminhamento MPU',
-        'ENC_VARA': 'Encaminhamento Vara',
-        # TEMPO_OCOR_DENUNCIA e ENCAMINHAMENTOS_JUSTICA removidos - gráficos removidos
-    }
-    
-    col_disp1, col_disp2 = st.columns(2)
-    with col_disp1:
-        st.markdown("**Colunas Disponíveis:**")
-        for col, desc in colunas_importantes.items():
-            if col in df.columns:
-                st.markdown(f"✓ {desc} ({col})")
-            else:
-                st.markdown(f"✗ {desc} ({col}) - **NÃO DISPONÍVEL**")
-    
-    with col_disp2:
-        st.markdown("**Estatísticas de Preenchimento:**")
-        for col, desc in colunas_importantes.items():
-            if col in df.columns:
-                total = len(df)
-                preenchidos = df[col].notna().sum()
-                percentual = (preenchidos / total * 100) if total > 0 else 0
-                st.markdown(f"{desc}: {preenchidos:,} de {total:,} ({percentual:.1f}%)")
-    
-    # Verificar filtragem de idade
-    st.markdown("#### Verificação de Filtragem por Idade:")
-    if 'NU_IDADE_N' in df.columns:
-        # Verificar se todos os registros estão na faixa 0-17 anos
-        idades_validas = [
-            'menor de 01 ano', '01 ano', '02 anos', '03 anos', '04 anos', '05 anos',
-            '06 anos', '07 anos', '08 anos', '09 anos', '10 anos', '11 anos',
-            '12 anos', '13 anos', '14 anos', '15 anos', '16 anos', '17 anos'
-        ]
-        registros_validos = df[df['NU_IDADE_N'].isin(idades_validas)]
-        registros_invalidos = df[~df['NU_IDADE_N'].isin(idades_validas)]
-        
-        col_idade1, col_idade2 = st.columns(2)
-        with col_idade1:
-            st.metric("Registros 0-17 anos", formatar_numero_br(len(registros_validos)))
-        with col_idade2:
-            st.metric("Registros fora da faixa", formatar_numero_br(len(registros_invalidos)))
-        
-        if len(registros_invalidos) > 0:
-            st.warning(f"⚠️ **Atenção:** {formatar_numero_br(len(registros_invalidos))} registros estão fora da faixa etária de 0-17 anos!")
-            st.markdown("**Idades encontradas fora da faixa:**")
-            idades_fora = registros_invalidos['NU_IDADE_N'].value_counts().head(10)
-            st.dataframe(idades_fora.reset_index(), use_container_width=True, hide_index=True)
-    
-    # Verificar filtragem de violência
-    st.markdown("#### Verificação de Filtragem por Violência:")
-    violencia_cols = ['VIOL_FISIC', 'VIOL_PSICO', 'VIOL_SEXU', 'VIOL_INFAN']
-    violencia_disponiveis = [col for col in violencia_cols if col in df.columns]
-    
-    if violencia_disponiveis:
-        # Verificar se todos os registros têm pelo menos um tipo de violência
-        def tem_violencia(row):
-            for col in violencia_disponiveis:
-                val = str(row.get(col, '')).upper().strip()
-                if val in ['1', 'SIM', 'S', '1.0']:
-                    return True
-                if pd.notna(row.get(col)) and row[col] == 1:
-                    return True
-            return False
-        
-        registros_com_violencia = df[df.apply(tem_violencia, axis=1)]
-        registros_sem_violencia = df[~df.apply(tem_violencia, axis=1)]
-        
-        col_viol1, col_viol2 = st.columns(2)
-        with col_viol1:
-            st.metric("Registros com Violência", formatar_numero_br(len(registros_com_violencia)))
-        with col_viol2:
-            st.metric("Registros sem Violência", formatar_numero_br(len(registros_sem_violencia)))
-        
-        if len(registros_sem_violencia) > 0:
-            st.warning(f"⚠️ **Atenção:** {formatar_numero_br(len(registros_sem_violencia))} registros não têm nenhum tipo de violência marcado!")
-    
-    # Resumo
-    st.markdown("#### Resumo:")
-    total_cols = len(df.columns)
-    st.info(f"**Total de colunas disponíveis:** {total_cols} | **Total de registros:** {formatar_numero_br(len(df))}")
+# Seção de Diagnóstico removida conforme solicitado
 
 # Título e Nota de Conformidade LGPD
 st.markdown("""
 <div class="main-title">
-    <h1>Dashboard SINAN: Análise de Notificações de Violência contra Crianças e Adolescentes</h1>
+    <h1 style="font-size: 2.5rem; margin-bottom: 0.5rem;">Dashboard SINAN: Análise de Notificações de Violência<br>contra Crianças e Adolescentes</h1>
 </div>
 """, unsafe_allow_html=True)
 
@@ -861,11 +757,16 @@ if uf_selecionada != 'Todos':
     
     # Filtro de Município (Apenas se a UF for selecionada)
     if 'MUNICIPIO_NOTIFIC' in df_filtrado.columns:
+        # Buscar todos os municípios da UF selecionada (sem limite)
         municipios_disponiveis = sorted([m for m in df_filtrado['MUNICIPIO_NOTIFIC'].dropna().unique() 
-                                         if str(m) != 'nan' and str(m) != 'N/A'])[:100]  # Limitar a 100 para performance
+                                         if str(m) != 'nan' and str(m) != 'N/A'])
         if municipios_disponiveis:
             municipio_options = ['Todos'] + municipios_disponiveis
-            municipio_selecionado = st.sidebar.selectbox('Filtrar por Município', municipio_options, index=0)
+            municipio_selecionado = st.sidebar.selectbox(
+                f'Filtrar por Município ({len(municipios_disponiveis)} disponíveis)', 
+                municipio_options, 
+                index=0
+            )
             
             if municipio_selecionado != 'Todos':
                 df_filtrado = df_filtrado[df_filtrado['MUNICIPIO_NOTIFIC'] == municipio_selecionado]
@@ -1015,7 +916,7 @@ else:
             title='Notificações por Ano e Tipo de Violência',
             labels={'ANO_NOTIFIC': 'Ano', 'Contagem': 'Contagem de Notificações', 'TIPO_VIOLENCIA': 'Tipo de Violência'},
             barmode='stack',
-            color_discrete_sequence=['#1a237e', '#283593', '#3949ab', '#5c6bc0', '#7986cb', '#9fa8da', '#c5cae9', '#e8eaf6', '#3f51b5', '#303f9f']  # Cores escuras e visíveis
+            color_discrete_sequence=['#2E86AB', '#A23B72', '#F18F01', '#C73E1D', '#6A994E', '#BC4749', '#7209B7', '#FF6B35', '#4ECDC4', '#FFE66D']  # Cores diversas e bem visíveis
         )
         st.plotly_chart(fig_bar_stacked, use_container_width=True)
     else:
