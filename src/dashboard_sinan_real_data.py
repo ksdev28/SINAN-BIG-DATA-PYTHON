@@ -38,39 +38,199 @@ from src.utils.munic_dict_loader import load_municipality_dict
 st.set_page_config(
     layout="wide", 
     page_title="Dashboard SINAN - Violência Infantil",
-    page_icon=None
+    page_icon=None,
+    initial_sidebar_state="expanded"  # Sidebar expandida por padrão
 )
 
 # CSS personalizado
 st.markdown("""
 <style>
     .main-title {
-        background: linear-gradient(90deg, #1f4e79 0%, #2d5a87 100%);
-        color: white;
-        padding: 1.5rem;
-        border-radius: 10px;
+        /* Monocromático - preto no branco */
+        color: #000000;
+        padding: 0.5rem;
+        margin-top: 3rem;
         margin-bottom: 1rem;
         text-align: center;
     }
     .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
+        /* Monocromático - sem gradiente */
+        background: #ffffff;
+        color: #000000;
         padding: 1rem;
+        border: 1px solid #000000;
         border-radius: 8px;
         text-align: center;
     }
     .section-header {
-        background: linear-gradient(90deg, #1f4e79 0%, #2d5a87 100%);
-        color: white;
+        /* Monocromático - sem background azul */
+        background: #ffffff;
+        color: #000000;
         padding: 0.8rem;
-        border-radius: 8px;
-        margin: 1rem 0;
+        border: 1px solid #000000;
+        border-radius: 4px;
+        margin: 0.5rem 0;
         text-align: center;
         font-size: 1.2rem;
         font-weight: bold;
     }
+    /* Melhorar responsividade dos gráficos */
+    .js-plotly-plot {
+        width: 100% !important;
+    }
+    /* Reduzir espaçamento entre elementos */
+    .element-container {
+        margin-bottom: 0.25rem !important;
+        padding-bottom: 0 !important;
+    }
+    /* Reduzir espaçamento dos gráficos */
+    .stPlotlyChart {
+        margin-bottom: 0.25rem !important;
+        margin-top: 0.25rem !important;
+    }
+    /* Reduzir espaçamento geral */
+    .block-container {
+        padding-top: 0.5rem;
+        padding-bottom: 0.5rem;
+    }
+    /* Reduzir espaçamento entre seções */
+    div[data-testid="stVerticalBlock"] > div {
+        gap: 0.25rem !important;
+    }
+    /* Reduzir espaçamento de markdown */
+    .stMarkdown {
+        margin-bottom: 0.25rem !important;
+    }
+    /* Reduzir espaçamento de info/warning */
+    .stAlert, .stInfo, .stWarning {
+        margin-bottom: 0.5rem !important;
+        margin-top: 0.5rem !important;
+    }
+    /* Reduzir espaçamento de caption */
+    .stCaption {
+        margin-top: 0.25rem !important;
+        margin-bottom: 0.25rem !important;
+    }
+    /* Monocromático - KPIs e métricas */
+    [data-testid="stMetricValue"] {
+        color: #000000 !important;
+    }
+    [data-testid="stMetricLabel"] {
+        color: #000000 !important;
+    }
+    /* Monocromático - textos e links */
+    .stMarkdown p, .stMarkdown strong, .stMarkdown em {
+        color: #000000 !important;
+    }
+    /* Monocromático - sidebar */
+    .css-1d391kg {
+        background-color: #ffffff !important;
+    }
+    /* Monocromático - headers da sidebar */
+    .css-1v0mbdj {
+        color: #000000 !important;
+    }
+    /* Layout responsivo dos KPIs - reorganizar colunas em mobile */
+    @media (max-width: 767px) {
+        /* Em mobile, forçar quebra de linha após 2 colunas */
+        .kpi-container [data-testid="column"] {
+            flex: 0 0 50% !important;
+            max-width: 50% !important;
+        }
+        .kpi-container [data-testid="column"]:nth-child(3),
+        .kpi-container [data-testid="column"]:nth-child(4) {
+            margin-top: 1rem;
+        }
+    }
 </style>
+<script>
+// Ajustar colorbars dinamicamente baseado no tamanho da tela
+function adjustColorbarsForMobile() {
+    const isMobile = window.innerWidth <= 767;
+    const plots = document.querySelectorAll('.js-plotly-plot');
+    
+    plots.forEach(plot => {
+        const plotId = plot.id;
+        if (plotId && window.Plotly) {
+            try {
+                // Abordagem direta usando relayout
+                if (isMobile) {
+                    window.Plotly.relayout(plotId, {
+                        'coloraxis.colorbar.orientation': 'h',
+                        'coloraxis.colorbar.y': -0.15,
+                        'coloraxis.colorbar.x': 0.5,
+                        'coloraxis.colorbar.xanchor': 'center',
+                        'coloraxis.colorbar.yanchor': 'top',
+                        'coloraxis.colorbar.len': 0.6,
+                        'coloraxis.colorbar.thickness': 15,
+                        'margin.b': 100,
+                        'margin.r': 50
+                    });
+                } else {
+                    window.Plotly.relayout(plotId, {
+                        'coloraxis.colorbar.orientation': 'v',
+                        'coloraxis.colorbar.x': 1.02,
+                        'coloraxis.colorbar.len': 0.5,
+                        'coloraxis.colorbar.thickness': 15,
+                        'margin.b': 50,
+                        'margin.r': 80
+                    });
+                }
+            } catch(e) {
+                // Ignorar se ainda não estiver pronto
+                console.log('Ajuste de colorbar aguardando renderização:', e);
+            }
+        }
+    });
+}
+
+// Executar quando a página carregar e quando a janela for redimensionada
+let colorbarTimeout;
+function scheduleColorbarsAdjust() {
+    clearTimeout(colorbarTimeout);
+    colorbarTimeout = setTimeout(adjustColorbarsForMobile, 500);
+}
+
+window.addEventListener('load', function() {
+    setTimeout(adjustColorbarsForMobile, 2000);
+});
+window.addEventListener('resize', scheduleColorbarsAdjust);
+
+// Observar mudanças no DOM para ajustar quando novos gráficos forem adicionados
+const observer = new MutationObserver(function(mutations) {
+    scheduleColorbarsAdjust();
+});
+observer.observe(document.body, { childList: true, subtree: true });
+</script>
 """, unsafe_allow_html=True)
+
+# Função helper para colorbar responsiva
+def get_colorbar_layout(is_mobile=False):
+    """
+    Retorna o layout da colorbar apropriado baseado no tamanho da tela.
+    Em mobile: colorbar horizontal abaixo do gráfico
+    Em desktop: colorbar vertical à direita do gráfico
+    """
+    if is_mobile:
+        return dict(
+            title=dict(text="Contagem", font=dict(size=11)),
+            tickfont=dict(size=10),
+            orientation="h",  # Horizontal (abaixo)
+            y=-0.15,  # Posição abaixo do gráfico
+            x=0.5,  # Centralizado
+            xanchor="center",
+            yanchor="top",
+            len=0.6,
+            thickness=15
+        )
+    else:
+        return dict(
+            title=dict(text="Contagem", font=dict(size=11)),
+            tickfont=dict(size=10),
+            x=1.02,  # À direita do gráfico
+            len=0.5,
+            thickness=15
+        )
 
 # Carregar dicionário de municípios
 @st.cache_data(ttl=86400)  # Cache por 24 horas (municípios não mudam)
@@ -703,7 +863,7 @@ if df is None or len(df) == 0:
 # Título e Nota de Conformidade LGPD
 st.markdown("""
 <div class="main-title">
-    <h1 style="font-size: 2.5rem; margin-bottom: 0.5rem;">Dashboard SINAN: Análise de Notificações de Violência<br>contra Crianças e Adolescentes</h1>
+    <h1 style="font-size: 2.5rem; margin-bottom: 0.5rem; color: #000000; font-weight: bold;">Dashboard SINAN: Análise de Notificações de Violência<br>contra Crianças e Adolescentes</h1>
 </div>
 """, unsafe_allow_html=True)
 
@@ -797,31 +957,39 @@ st.markdown('<div class="section-header">Indicadores Principais</div>', unsafe_a
 total_notificacoes = len(df_filtrado)
 media_anual = df_filtrado.groupby('ANO_NOTIFIC').size().mean().round(0) if 'ANO_NOTIFIC' in df_filtrado.columns and not df_filtrado.empty else 0
 
-col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
+# Calcular valores dos KPIs
+if 'TIPO_VIOLENCIA' in df_filtrado.columns and not df_filtrado.empty:
+    maior_tipo = df_filtrado['TIPO_VIOLENCIA'].mode()[0] if len(df_filtrado['TIPO_VIOLENCIA'].mode()) > 0 else "N/A"
+else:
+    maior_tipo = "N/A"
 
-with col_kpi1:
-    st.metric("Total de Notificações", formatar_numero_br(total_notificacoes))
-
-with col_kpi2:
-    st.metric("Média Anual", formatar_numero_br(media_anual))
-
-with col_kpi3:
-    if 'TIPO_VIOLENCIA' in df_filtrado.columns and not df_filtrado.empty:
-        maior_tipo = df_filtrado['TIPO_VIOLENCIA'].mode()[0] if len(df_filtrado['TIPO_VIOLENCIA'].mode()) > 0 else "N/A"
+if 'SEXO' in df_filtrado.columns and not df_filtrado.empty:
+    sexo_dist = df_filtrado['SEXO'].value_counts()
+    if len(sexo_dist) > 0:
+        sexo_maior = sexo_dist.index[0]
     else:
-        maior_tipo = "N/A"
-    st.metric("Tipo Mais Frequente", maior_tipo[:30] + "..." if len(str(maior_tipo)) > 30 else maior_tipo)
+        sexo_maior = "N/A"
+else:
+    sexo_maior = "N/A"
 
-with col_kpi4:
-    if 'SEXO' in df_filtrado.columns and not df_filtrado.empty:
-        sexo_dist = df_filtrado['SEXO'].value_counts()
-        if len(sexo_dist) > 0:
-            sexo_maior = sexo_dist.index[0]
-            st.metric("Sexo Mais Frequente", sexo_maior)
-        else:
-            st.metric("Sexo Mais Frequente", "N/A")
-    else:
-        st.metric("Sexo Mais Frequente", "N/A")
+# Layout responsivo: 4 colunas (desktop) ou 2x2 (mobile via CSS)
+with st.container():
+    st.markdown('<div class="kpi-container">', unsafe_allow_html=True)
+    col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
+
+    with col_kpi1:
+        st.metric("Total de Notificações", formatar_numero_br(total_notificacoes))
+
+    with col_kpi2:
+        st.metric("Média Anual", formatar_numero_br(media_anual))
+
+    with col_kpi3:
+        st.metric("Tipo Mais Frequente", maior_tipo[:30] + "..." if len(str(maior_tipo)) > 30 else maior_tipo)
+
+    with col_kpi4:
+        st.metric("Sexo Mais Frequente", sexo_maior)
+
+    st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown("---")
 
@@ -889,10 +1057,11 @@ else:
                 gridwidth=1,
                 gridcolor='lightgray'
             ),
-            margin=dict(l=80, r=20, t=50, b=50)  # Aumentar margem esquerda para rótulos
+            margin=dict(l=80, r=50, t=80, b=50),  # Margens otimizadas
+            height=500  # Altura fixa para evitar compressão
         )
         fig_line.update_traces(hovertemplate='<b>%{x}</b><br>Total: %{y:,.0f}'.replace(',', 'X').replace('.', ',').replace('X', '.'))
-        st.plotly_chart(fig_line, use_container_width=True)
+        st.plotly_chart(fig_line, use_container_width=True, height=500)
     else:
         st.info("Dados de ano não disponíveis para este gráfico")
 
@@ -916,9 +1085,28 @@ else:
             title='Notificações por Ano e Tipo de Violência',
             labels={'ANO_NOTIFIC': 'Ano', 'Contagem': 'Contagem de Notificações', 'TIPO_VIOLENCIA': 'Tipo de Violência'},
             barmode='stack',
-            color_discrete_sequence=['#2E86AB', '#A23B72', '#F18F01', '#C73E1D', '#6A994E', '#BC4749', '#7209B7', '#FF6B35', '#4ECDC4', '#FFE66D']  # Cores diversas e bem visíveis
+            color_discrete_sequence=['#2E86AB', '#A23B72', '#F18F01', '#C73E1D', '#6A994E', '#BC4749', '#7209B7', '#FF6B35', '#4ECDC4', '#FFE66D'],  # Cores diversas e bem visíveis
+            height=500  # Altura fixa para evitar compressão
         )
-        st.plotly_chart(fig_bar_stacked, use_container_width=True)
+        # Melhorar layout: legenda abaixo com mais espaçamento do gráfico
+        fig_bar_stacked.update_layout(
+            legend=dict(
+                orientation="h",
+                yanchor="top",
+                y=-0.25,  # Aumentado para mais espaçamento entre gráfico e legenda
+                xanchor="center",
+                x=0.5,
+                font=dict(size=10),
+                bgcolor="rgba(255,255,255,0.8)",
+                bordercolor="rgba(0,0,0,0.2)",
+                borderwidth=1,
+                itemwidth=30,
+                tracegroupgap=10
+            ),
+            margin=dict(l=50, r=50, t=80, b=120),  # Aumentada margem inferior para acomodar legenda
+            height=500
+        )
+        st.plotly_chart(fig_bar_stacked, use_container_width=True, height=500)
     else:
         st.info("Dados de tipo de violência ou ano não disponíveis para este gráfico")
 
@@ -963,10 +1151,32 @@ else:
                 title='Contagem de Notificações por Faixa Etária e Sexo (0-17 anos)',
                 labels={'FAIXA_ETARIA': 'Faixa Etária', 'Contagem': 'Contagem de Notificações', 'SEXO': 'Sexo'},
                 category_orders={'FAIXA_ETARIA': faixas_validas},  # Garantir ordem correta
-                color_discrete_sequence=['#2E86AB', '#A23B72', '#F18F01', '#C73E1D']  # Cores escuras e visíveis
+                color_discrete_sequence=['#2E86AB', '#A23B72', '#F18F01', '#C73E1D'],  # Cores escuras e visíveis
+                height=500  # Altura fixa
             )
             fig_bar_grouped.update_xaxes(tickangle=0)
-            st.plotly_chart(fig_bar_grouped, use_container_width=True)
+            # Melhorar layout: legenda horizontal abaixo com mais espaçamento do gráfico
+            fig_bar_grouped.update_layout(
+                legend=dict(
+                    orientation="h",
+                    yanchor="top",
+                    y=-0.25,  # Aumentado para mais espaçamento entre gráfico e legenda
+                    xanchor="center",
+                    x=0.5,
+                    font=dict(size=11),
+                    bgcolor="rgba(255,255,255,0.8)",
+                    bordercolor="rgba(0,0,0,0.2)",
+                    borderwidth=1,
+                    itemwidth=40,
+                    tracegroupgap=20,
+                    itemsizing="constant",
+                    itemclick="toggleothers",
+                    itemdoubleclick="toggle"
+                ),
+                margin=dict(l=50, r=50, t=80, b=120),  # Aumentada margem inferior para acomodar legenda
+                height=500
+            )
+            st.plotly_chart(fig_bar_grouped, use_container_width=True, height=500)
             
             # Mostrar estatísticas
             total_casos = df_demografia['Contagem'].sum()
@@ -990,10 +1200,15 @@ else:
                 x='UF_NOTIFIC',
                 y='Contagem',
                 title='Contagem de Notificações por UF',
-                labels={'UF_NOTIFIC': 'Unidade Federativa', 'Contagem': 'Contagem de Notificações'}
+                labels={'UF_NOTIFIC': 'Unidade Federativa', 'Contagem': 'Contagem de Notificações'},
+                height=500
             )
             fig_geo.update_xaxes(tickangle=45)
-            st.plotly_chart(fig_geo, use_container_width=True)
+            fig_geo.update_layout(
+                margin=dict(l=50, r=50, t=80, b=100),
+                height=500
+            )
+            st.plotly_chart(fig_geo, use_container_width=True, height=500)
         else:
             st.info("Dados geográficos não disponíveis para este gráfico")
     
@@ -1010,10 +1225,15 @@ else:
                 x='MUNICIPIO_NOTIFIC',
                 y='Contagem',
                 title=f'Top 20 Municípios com Mais Notificações ({uf_selecionada})',
-                labels={'MUNICIPIO_NOTIFIC': 'Município', 'Contagem': 'Contagem de Notificações'}
+                labels={'MUNICIPIO_NOTIFIC': 'Município', 'Contagem': 'Contagem de Notificações'},
+                height=500
             )
             fig_mun_bar.update_xaxes(tickangle=45)
-            st.plotly_chart(fig_mun_bar, use_container_width=True)
+            fig_mun_bar.update_layout(
+                margin=dict(l=50, r=50, t=80, b=150),  # Mais espaço para rótulos inclinados
+                height=500
+            )
+            st.plotly_chart(fig_mun_bar, use_container_width=True, height=500)
         else:
             st.info("Dados de município não disponíveis para este gráfico")
 
@@ -1034,9 +1254,18 @@ else:
             title='Top 10 Locais de Ocorrência',
             labels={'Local': 'Local de Ocorrência', 'Contagem': 'Número de Notificações'},
             color='Contagem',
-            color_continuous_scale='Plasma'  # Paleta mais escura e visível
+            color_continuous_scale='Plasma',  # Paleta mais escura e visível
+            height=500
         )
-        st.plotly_chart(fig_local, use_container_width=True)
+        # Layout responsivo: colorbar na lateral (desktop) por padrão
+        # JavaScript ajustará para abaixo em mobile
+        fig_local.update_layout(
+            margin=dict(l=200, r=80, t=80, b=50),  # Espaço para colorbar lateral (desktop)
+            height=500,
+            coloraxis_showscale=True,
+            coloraxis_colorbar=get_colorbar_layout(is_mobile=False)  # Desktop por padrão
+        )
+        st.plotly_chart(fig_local, use_container_width=True, height=500)
 
     # Gráfico 6: Perfil do Agressor (Sexo) - H3
     if 'AUTOR_SEXO_CORRIGIDO' in df_filtrado.columns:
@@ -1054,9 +1283,15 @@ else:
             title='Distribuição por Sexo do Agressor (H3)',
             labels={'Sexo': 'Sexo do Agressor', 'Contagem': 'Contagem'},
             color='Sexo',
-            color_discrete_sequence=['#2E86AB', '#A23B72', '#F18F01', '#C73E1D']  # Cores escuras e visíveis
+            color_discrete_sequence=['#2E86AB', '#A23B72', '#F18F01', '#C73E1D'],  # Cores escuras e visíveis
+            height=450
         )
-        st.plotly_chart(fig_autor, use_container_width=True)
+        fig_autor.update_layout(
+            showlegend=False,  # Não precisa de legenda (já está nas barras)
+            margin=dict(l=50, r=50, t=80, b=50),
+            height=450
+        )
+        st.plotly_chart(fig_autor, use_container_width=True, height=450)
     
     # Gráfico 7: Relacionamento com o Agressor - H8 (Apenas os mais comuns)
     if 'GRAU_PARENTESCO' in df_filtrado.columns:
@@ -1116,12 +1351,18 @@ else:
                 texttemplate='%{text:,.0f}'.replace(',', 'X').replace('.', ',').replace('X', '.'),
                 textposition='outside'
             )
+            # Layout responsivo: colorbar na lateral (desktop) por padrão
+            # JavaScript ajustará para abaixo em mobile
             fig_parent.update_layout(
                 xaxis_title="Número de Notificações",
                 yaxis_title="Grau de Parentesco",
-                showlegend=False
+                showlegend=False,
+                margin=dict(l=200, r=80, t=80, b=50),  # Espaço para colorbar lateral (desktop)
+                height=500,
+                coloraxis_showscale=True,
+                coloraxis_colorbar=get_colorbar_layout(is_mobile=False)  # Desktop por padrão
             )
-            st.plotly_chart(fig_parent, use_container_width=True)
+            st.plotly_chart(fig_parent, use_container_width=True, height=500)
             
             # Tabela complementar com percentuais
             with st.expander(f"Ver detalhes completos dos Top {num_parentescos}"):
@@ -1150,10 +1391,19 @@ else:
                 title='Distribuição por Raça/Cor da Vítima (H4)',
                 labels={'Raça/Cor': 'Raça/Cor', 'Contagem': 'Número de Notificações'},
                 color='Contagem',
-                color_continuous_scale='Viridis'  # Paleta mais escura e visível
+                color_continuous_scale='Viridis',  # Paleta mais escura e visível
+                height=500
             )
             fig_raca.update_xaxes(tickangle=45)
-            st.plotly_chart(fig_raca, use_container_width=True)
+            # Layout responsivo: colorbar na lateral (desktop) por padrão
+            # JavaScript ajustará para abaixo em mobile
+            fig_raca.update_layout(
+                margin=dict(l=50, r=80, t=80, b=100),  # Espaço para colorbar lateral (desktop)
+                height=500,
+                coloraxis_showscale=True,
+                coloraxis_colorbar=get_colorbar_layout(is_mobile=False)  # Desktop por padrão
+            )
+            st.plotly_chart(fig_raca, use_container_width=True, height=500)
     
     # Gráfico 9: Evolução Mensal - H10
     if 'DT_NOTIFIC' in df_filtrado.columns and df_filtrado['DT_NOTIFIC'].notna().any():
@@ -1171,10 +1421,15 @@ else:
             markers=True,
             title='Evolução Mensal de Notificações (H10)',
             labels={'MES_ANO': 'Mês/Ano', 'Total': 'Total de Notificações'},
-            color_discrete_sequence=['#1a237e']  # Cor mais escura e visível
+            color_discrete_sequence=['#1a237e'],  # Cor mais escura e visível
+            height=500
         )
         fig_mensal.update_xaxes(tickangle=45, nticks=20)
-        st.plotly_chart(fig_mensal, use_container_width=True)
+        fig_mensal.update_layout(
+            margin=dict(l=50, r=50, t=80, b=150),  # Mais espaço para rótulos inclinados
+            height=500
+        )
+        st.plotly_chart(fig_mensal, use_container_width=True, height=500)
     
     # Gráfico 11: Sazonalidade - REMOVIDO conforme solicitado
     
@@ -1194,9 +1449,19 @@ else:
                 title='Top 10 Estados por Número de Notificações (H6, H7)',
                 labels={'UF_NOTIFIC': 'Estado', 'Contagem': 'Total de Notificações'},
                 color='Contagem',
-                color_continuous_scale='Magma'  # Paleta mais escura e visível
+                color_continuous_scale='Magma',  # Paleta mais escura e visível
+                height=500
             )
-            st.plotly_chart(fig_regional, use_container_width=True)
+            fig_regional.update_xaxes(tickangle=45)
+            # Layout responsivo: colorbar na lateral (desktop) por padrão
+            # JavaScript ajustará para abaixo em mobile
+            fig_regional.update_layout(
+                margin=dict(l=50, r=80, t=80, b=50),  # Espaço para colorbar lateral (desktop)
+                height=500,
+                coloraxis_showscale=True,
+                coloraxis_colorbar=get_colorbar_layout(is_mobile=False)  # Desktop por padrão
+            )
+            st.plotly_chart(fig_regional, use_container_width=True, height=500)
     
     # Gráfico 12: Tempo entre Ocorrência e Denúncia - REMOVIDO conforme solicitado
     
