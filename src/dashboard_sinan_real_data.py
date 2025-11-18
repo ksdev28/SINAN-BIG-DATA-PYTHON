@@ -1061,7 +1061,7 @@ else:
             height=500  # Altura fixa para evitar compressão
         )
         fig_line.update_traces(hovertemplate='<b>%{x}</b><br>Total: %{y:,.0f}'.replace(',', 'X').replace('.', ',').replace('X', '.'))
-        st.plotly_chart(fig_line, use_container_width=True, height=500)
+        st.plotly_chart(fig_line, use_container_width=True)
     else:
         st.info("Dados de ano não disponíveis para este gráfico")
 
@@ -1106,7 +1106,7 @@ else:
             margin=dict(l=50, r=50, t=80, b=120),  # Aumentada margem inferior para acomodar legenda
             height=500
         )
-        st.plotly_chart(fig_bar_stacked, use_container_width=True, height=500)
+        st.plotly_chart(fig_bar_stacked, use_container_width=True)
     else:
         st.info("Dados de tipo de violência ou ano não disponíveis para este gráfico")
 
@@ -1176,7 +1176,7 @@ else:
                 margin=dict(l=50, r=50, t=80, b=120),  # Aumentada margem inferior para acomodar legenda
                 height=500
             )
-            st.plotly_chart(fig_bar_grouped, use_container_width=True, height=500)
+            st.plotly_chart(fig_bar_grouped, use_container_width=True)
             
             # Mostrar estatísticas
             total_casos = df_demografia['Contagem'].sum()
@@ -1208,7 +1208,7 @@ else:
                 margin=dict(l=50, r=50, t=80, b=100),
                 height=500
             )
-            st.plotly_chart(fig_geo, use_container_width=True, height=500)
+            st.plotly_chart(fig_geo, use_container_width=True)
         else:
             st.info("Dados geográficos não disponíveis para este gráfico")
     
@@ -1233,7 +1233,7 @@ else:
                 margin=dict(l=50, r=50, t=80, b=150),  # Mais espaço para rótulos inclinados
                 height=500
             )
-            st.plotly_chart(fig_mun_bar, use_container_width=True, height=500)
+            st.plotly_chart(fig_mun_bar, use_container_width=True)
         else:
             st.info("Dados de município não disponíveis para este gráfico")
 
@@ -1265,7 +1265,7 @@ else:
             coloraxis_showscale=True,
             coloraxis_colorbar=get_colorbar_layout(is_mobile=False)  # Desktop por padrão
         )
-        st.plotly_chart(fig_local, use_container_width=True, height=500)
+        st.plotly_chart(fig_local, use_container_width=True)
 
     # Gráfico 6: Perfil do Agressor (Sexo) - H3
     if 'AUTOR_SEXO_CORRIGIDO' in df_filtrado.columns:
@@ -1291,7 +1291,7 @@ else:
             margin=dict(l=50, r=50, t=80, b=50),
             height=450
         )
-        st.plotly_chart(fig_autor, use_container_width=True, height=450)
+        st.plotly_chart(fig_autor, use_container_width=True)
     
     # Gráfico 7: Relacionamento com o Agressor - H8 (Apenas os mais comuns)
     if 'GRAU_PARENTESCO' in df_filtrado.columns:
@@ -1362,7 +1362,7 @@ else:
                 coloraxis_showscale=True,
                 coloraxis_colorbar=get_colorbar_layout(is_mobile=False)  # Desktop por padrão
             )
-            st.plotly_chart(fig_parent, use_container_width=True, height=500)
+            st.plotly_chart(fig_parent, use_container_width=True)
             
             # Tabela complementar com percentuais
             with st.expander(f"Ver detalhes completos dos Top {num_parentescos}"):
@@ -1403,7 +1403,7 @@ else:
                 coloraxis_showscale=True,
                 coloraxis_colorbar=get_colorbar_layout(is_mobile=False)  # Desktop por padrão
             )
-            st.plotly_chart(fig_raca, use_container_width=True, height=500)
+            st.plotly_chart(fig_raca, use_container_width=True)
     
     # Gráfico 9: Evolução Mensal - H10
     if 'DT_NOTIFIC' in df_filtrado.columns and df_filtrado['DT_NOTIFIC'].notna().any():
@@ -1429,7 +1429,7 @@ else:
             margin=dict(l=50, r=50, t=80, b=150),  # Mais espaço para rótulos inclinados
             height=500
         )
-        st.plotly_chart(fig_mensal, use_container_width=True, height=500)
+        st.plotly_chart(fig_mensal, use_container_width=True)
     
     # Gráfico 11: Sazonalidade - REMOVIDO conforme solicitado
     
@@ -1461,7 +1461,7 @@ else:
                 coloraxis_showscale=True,
                 coloraxis_colorbar=get_colorbar_layout(is_mobile=False)  # Desktop por padrão
             )
-            st.plotly_chart(fig_regional, use_container_width=True, height=500)
+            st.plotly_chart(fig_regional, use_container_width=True)
     
     # Gráfico 12: Tempo entre Ocorrência e Denúncia - REMOVIDO conforme solicitado
     
