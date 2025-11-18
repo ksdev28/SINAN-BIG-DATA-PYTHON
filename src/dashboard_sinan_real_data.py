@@ -258,6 +258,63 @@ def formatar_numero_br(numero):
     except:
         return str(numero)
 
+def formatar_numero_compacto(numero):
+    """
+    Formata números grandes no padrão brasileiro usando sufixos (k, M, B).
+    Ex.: 78107 -> 78.107k
+    """
+    if numero is None or pd.isna(numero):
+        return "0"
+    try:
+        num = float(numero)
+        suffixes = [
+            (1_000_000_000, "B"),
+            (1_000_000, "M"),
+            (1_000, "k")
+        ]
+        for divisor, suffix in suffixes:
+            if abs(num) >= divisor:
+                valor = num / divisor
+                return f"{valor:,.3f}".replace(",", "X").replace(".", ",").replace("X", ".") + suffix
+        # Para valores menores que mil, manter formatação padrão brasileira
+        return formatar_numero_br(num)
+    except Exception:
+        return str(numero)
+
+def gerar_tick_values(min_value, max_value, max_ticks=8):
+    """Gera valores para ticks de eixo considerando limites fornecidos."""
+    if pd.isna(max_value) or max_value is None:
+        return []
+    if min_value is None or pd.isna(min_value):
+        min_value = 0
+    min_value = float(min_value)
+    max_value = float(max_value)
+    if max_value < min_value:
+        min_value, max_value = max_value, min_value
+    if max_value == min_value:
+        return [int(round(max_value))]
+    max_ticks = max(2, max_ticks)
+    step = (max_value - min_value) / (max_ticks - 1)
+    tick_values = [min_value + i * step for i in range(max_ticks)]
+    tick_values = sorted(set(int(round(v)) for v in tick_values))
+    if tick_values and tick_values[-1] != int(round(max_value)):
+        tick_values.append(int(round(max_value)))
+    if tick_values and tick_values[0] > int(round(min_value)):
+        tick_values.insert(0, int(round(min_value)))
+    return tick_values
+
+def aplicar_formatacao_eixo(figura, max_value, eixo='y', min_value=0, max_ticks=8, usar_compacto=False):
+    """Aplica formatação brasileira aos ticks do eixo especificado."""
+    tick_values = gerar_tick_values(min_value, max_value, max_ticks)
+    if not tick_values:
+        return
+    formatter = formatar_numero_compacto if usar_compacto else formatar_numero_br
+    tick_text = [formatter(valor) for valor in tick_values]
+    if eixo == 'y':
+        figura.update_yaxes(tickmode='array', tickvals=tick_values, ticktext=tick_text)
+    else:
+        figura.update_xaxes(tickmode='array', tickvals=tick_values, ticktext=tick_text)
+
 # Dicionário completo de relacionamentos com agressor (nomes completos)
 # Nota: REL_INST e REL_PROPRI não são exatamente "parentesco", mas sim tipo de relação
 RELACIONAMENTO_DICT = {
@@ -1017,6 +1074,7 @@ else:
     if 'ANO_NOTIFIC' in df_filtrado.columns and df_filtrado['ANO_NOTIFIC'].notna().any():
         df_tendencia = df_filtrado.groupby('ANO_NOTIFIC').size().reset_index(name='Total_Notificacoes')
         df_tendencia = df_tendencia.sort_values('ANO_NOTIFIC')
+        df_tendencia['Total_Formatado'] = df_tendencia['Total_Notificacoes'].apply(formatar_numero_br)
         
         fig_line = px.line(
             df_tendencia, 
@@ -1028,31 +1086,11 @@ else:
             color_discrete_sequence=['#1a237e']  # Cor mais escura e visível
         )
         # Formatação brasileira de números e otimização do eixo Y
-        max_value = df_tendencia['Total_Notificacoes'].max()
-        min_value = df_tendencia['Total_Notificacoes'].min()
-        
-        # Calcular número ideal de ticks (máximo 8 para evitar sobreposição)
-        num_ticks = min(8, len(df_tendencia))
-        
-        # Criar ticks uniformemente espaçados
-        tick_values = []
-        if num_ticks > 1:
-            step = (max_value - min_value) / (num_ticks - 1)
-            tick_values = [min_value + i * step for i in range(num_ticks)]
-        else:
-            tick_values = [min_value, max_value]
-        
-        # Formatar valores para exibição brasileira
-        tick_text = [formatar_numero_br(int(v)) for v in tick_values]
-        
         fig_line.update_layout(
             xaxis_title="Ano",
             yaxis_title="Total de Notificações",
             hovermode='x unified',
             yaxis=dict(
-                tickmode='array',
-                tickvals=tick_values,
-                ticktext=tick_text,
                 showgrid=True,
                 gridwidth=1,
                 gridcolor='lightgray'
@@ -1060,7 +1098,12 @@ else:
             margin=dict(l=80, r=50, t=80, b=50),  # Margens otimizadas
             height=500  # Altura fixa para evitar compressão
         )
-        fig_line.update_traces(hovertemplate='<b>%{x}</b><br>Total: %{y:,.0f}'.replace(',', 'X').replace('.', ',').replace('X', '.'))
+        max_value = df_tendencia['Total_Notificacoes'].max()
+        aplicar_formatacao_eixo(fig_line, max_value, eixo='y')
+        fig_line.update_traces(
+            customdata=df_tendencia['Total_Formatado'],
+            hovertemplate='<b>%{x}</b><br>Total: %{customdata}<extra></extra>'
+        )
         st.plotly_chart(fig_line, use_container_width=True)
     else:
         st.info("Dados de ano não disponíveis para este gráfico")
@@ -1076,6 +1119,7 @@ else:
         # Pegar apenas os tipos mais frequentes para não sobrecarregar o gráfico
         tipos_mais_freq = df_filtrado['TIPO_VIOLENCIA'].value_counts().head(5).index.tolist()
         df_composicao_filtrado = df_composicao[df_composicao['TIPO_VIOLENCIA'].isin(tipos_mais_freq)]
+        df_composicao_filtrado['Contagem_Formatada'] = df_composicao_filtrado['Contagem'].apply(formatar_numero_br)
         
         fig_bar_stacked = px.bar(
             df_composicao_filtrado, 
@@ -1086,7 +1130,8 @@ else:
             labels={'ANO_NOTIFIC': 'Ano', 'Contagem': 'Contagem de Notificações', 'TIPO_VIOLENCIA': 'Tipo de Violência'},
             barmode='stack',
             color_discrete_sequence=['#2E86AB', '#A23B72', '#F18F01', '#C73E1D', '#6A994E', '#BC4749', '#7209B7', '#FF6B35', '#4ECDC4', '#FFE66D'],  # Cores diversas e bem visíveis
-            height=500  # Altura fixa para evitar compressão
+            height=500,  # Altura fixa para evitar compressão
+            custom_data=['Contagem_Formatada', 'TIPO_VIOLENCIA']
         )
         # Melhorar layout: legenda abaixo com mais espaçamento do gráfico
         fig_bar_stacked.update_layout(
@@ -1105,6 +1150,11 @@ else:
             ),
             margin=dict(l=50, r=50, t=80, b=120),  # Aumentada margem inferior para acomodar legenda
             height=500
+        )
+        max_contagem = df_composicao_filtrado['Contagem'].max()
+        aplicar_formatacao_eixo(fig_bar_stacked, max_contagem, eixo='y')
+        fig_bar_stacked.update_traces(
+            hovertemplate='<b>%{x}</b><br>Tipo: %{customdata[1]}<br>Total: %{customdata[0]}<extra></extra>'
         )
         st.plotly_chart(fig_bar_stacked, use_container_width=True)
     else:
@@ -1141,6 +1191,7 @@ else:
             df_completo = pd.DataFrame(todas_combinacoes, columns=['FAIXA_ETARIA', 'SEXO'])
             df_demografia = df_completo.merge(df_demografia, on=['FAIXA_ETARIA', 'SEXO'], how='left')
             df_demografia['Contagem'] = df_demografia['Contagem'].fillna(0).astype(int)
+            df_demografia['Contagem_Formatada'] = df_demografia['Contagem'].apply(formatar_numero_br)
             
             fig_bar_grouped = px.bar(
                 df_demografia, 
@@ -1152,7 +1203,8 @@ else:
                 labels={'FAIXA_ETARIA': 'Faixa Etária', 'Contagem': 'Contagem de Notificações', 'SEXO': 'Sexo'},
                 category_orders={'FAIXA_ETARIA': faixas_validas},  # Garantir ordem correta
                 color_discrete_sequence=['#2E86AB', '#A23B72', '#F18F01', '#C73E1D'],  # Cores escuras e visíveis
-                height=500  # Altura fixa
+                height=500,  # Altura fixa
+                custom_data=['Contagem_Formatada', 'SEXO']
             )
             fig_bar_grouped.update_xaxes(tickangle=0)
             # Melhorar layout: legenda horizontal abaixo com mais espaçamento do gráfico
@@ -1176,6 +1228,11 @@ else:
                 margin=dict(l=50, r=50, t=80, b=120),  # Aumentada margem inferior para acomodar legenda
                 height=500
             )
+            max_contagem_demografia = df_demografia['Contagem'].max()
+            aplicar_formatacao_eixo(fig_bar_grouped, max_contagem_demografia, eixo='y')
+            fig_bar_grouped.update_traces(
+                hovertemplate='<b>%{x}</b><br>Sexo: %{customdata[1]}<br>Total: %{customdata[0]}<extra></extra>'
+            )
             st.plotly_chart(fig_bar_grouped, use_container_width=True)
             
             # Mostrar estatísticas
@@ -1194,6 +1251,7 @@ else:
         if 'UF_NOTIFIC' in df_filtrado.columns:
             df_geo = df_filtrado.groupby('UF_NOTIFIC').size().reset_index(name='Contagem')
             df_geo = df_geo.sort_values('Contagem', ascending=False).head(27)  # Top 27 UFs
+            df_geo['Contagem_Formatada'] = df_geo['Contagem'].apply(formatar_numero_br)
             
             fig_geo = px.bar(
                 df_geo,
@@ -1201,12 +1259,17 @@ else:
                 y='Contagem',
                 title='Contagem de Notificações por UF',
                 labels={'UF_NOTIFIC': 'Unidade Federativa', 'Contagem': 'Contagem de Notificações'},
-                height=500
+                height=500,
+                custom_data=['Contagem_Formatada']
             )
             fig_geo.update_xaxes(tickangle=45)
             fig_geo.update_layout(
                 margin=dict(l=50, r=50, t=80, b=100),
                 height=500
+            )
+            aplicar_formatacao_eixo(fig_geo, df_geo['Contagem'].max(), eixo='y')
+            fig_geo.update_traces(
+                hovertemplate='<b>%{x}</b><br>Total: %{customdata[0]}<extra></extra>'
             )
             st.plotly_chart(fig_geo, use_container_width=True)
         else:
@@ -1219,6 +1282,7 @@ else:
         if 'MUNICIPIO_NOTIFIC' in df_filtrado.columns:
             df_municipio = df_filtrado.groupby('MUNICIPIO_NOTIFIC').size().reset_index(name='Contagem')
             df_municipio = df_municipio.sort_values('Contagem', ascending=False).head(20)  # Top 20 municípios
+            df_municipio['Contagem_Formatada'] = df_municipio['Contagem'].apply(formatar_numero_br)
             
             fig_mun_bar = px.bar(
                 df_municipio,
@@ -1226,12 +1290,17 @@ else:
                 y='Contagem',
                 title=f'Top 20 Municípios com Mais Notificações ({uf_selecionada})',
                 labels={'MUNICIPIO_NOTIFIC': 'Município', 'Contagem': 'Contagem de Notificações'},
-                height=500
+                height=500,
+                custom_data=['Contagem_Formatada']
             )
             fig_mun_bar.update_xaxes(tickangle=45)
             fig_mun_bar.update_layout(
                 margin=dict(l=50, r=50, t=80, b=150),  # Mais espaço para rótulos inclinados
                 height=500
+            )
+            aplicar_formatacao_eixo(fig_mun_bar, df_municipio['Contagem'].max(), eixo='y')
+            fig_mun_bar.update_traces(
+                hovertemplate='<b>%{x}</b><br>Total: %{customdata[0]}<extra></extra>'
             )
             st.plotly_chart(fig_mun_bar, use_container_width=True)
         else:
@@ -1245,6 +1314,7 @@ else:
         df_local = df_filtrado['LOCAL_OCOR'].value_counts().head(10).reset_index()
         df_local.columns = ['Local', 'Contagem']
         df_local = df_local.sort_values('Contagem', ascending=True)  # Ordenar para gráfico horizontal
+        df_local['Contagem_Formatada'] = df_local['Contagem'].apply(formatar_numero_br)
         
         fig_local = px.bar(
             df_local,
@@ -1255,7 +1325,8 @@ else:
             labels={'Local': 'Local de Ocorrência', 'Contagem': 'Número de Notificações'},
             color='Contagem',
             color_continuous_scale='Plasma',  # Paleta mais escura e visível
-            height=500
+            height=500,
+            custom_data=['Contagem_Formatada']
         )
         # Layout responsivo: colorbar na lateral (desktop) por padrão
         # JavaScript ajustará para abaixo em mobile
@@ -1264,6 +1335,10 @@ else:
             height=500,
             coloraxis_showscale=True,
             coloraxis_colorbar=get_colorbar_layout(is_mobile=False)  # Desktop por padrão
+        )
+        aplicar_formatacao_eixo(fig_local, df_local['Contagem'].max(), eixo='x')
+        fig_local.update_traces(
+            hovertemplate='<b>%{y}</b><br>Total: %{customdata[0]}<extra></extra>'
         )
         st.plotly_chart(fig_local, use_container_width=True)
 
@@ -1275,6 +1350,7 @@ else:
         df_autor = df_filtrado['AUTOR_SEXO_CORRIGIDO'].value_counts().reset_index()
         df_autor.columns = ['Sexo', 'Contagem']
         df_autor = df_autor[df_autor['Sexo'] != 'Não informado']  # Filtrar valores inválidos
+        df_autor['Contagem_Formatada'] = df_autor['Contagem'].apply(formatar_numero_br)
         
         fig_autor = px.bar(
             df_autor,
@@ -1284,12 +1360,17 @@ else:
             labels={'Sexo': 'Sexo do Agressor', 'Contagem': 'Contagem'},
             color='Sexo',
             color_discrete_sequence=['#2E86AB', '#A23B72', '#F18F01', '#C73E1D'],  # Cores escuras e visíveis
-            height=450
+            height=450,
+            custom_data=['Contagem_Formatada']
         )
         fig_autor.update_layout(
             showlegend=False,  # Não precisa de legenda (já está nas barras)
             margin=dict(l=50, r=50, t=80, b=50),
             height=450
+        )
+        aplicar_formatacao_eixo(fig_autor, df_autor['Contagem'].max(), eixo='y')
+        fig_autor.update_traces(
+            hovertemplate='<b>%{x}</b><br>Total: %{customdata[0]}<extra></extra>'
         )
         st.plotly_chart(fig_autor, use_container_width=True)
     
@@ -1329,6 +1410,7 @@ else:
             # Pegar apenas os top N mais comuns
             df_parent_top = df_parent.head(num_parentescos).copy()
             df_parent_top = df_parent_top.sort_values('Contagem', ascending=True)  # Ordenar para gráfico horizontal
+            df_parent_top['Contagem_Formatada'] = df_parent_top['Contagem'].apply(formatar_numero_br)
             
             # Mostrar estatísticas
             percentual_total = df_parent_top['Percentual'].sum()
@@ -1344,7 +1426,8 @@ else:
                 labels={'Parentesco': 'Tipo de Relacionamento', 'Contagem': 'Número de Notificações'},
                 color='Contagem',
                 color_continuous_scale='Inferno',  # Paleta mais escura e visível
-                text='Contagem'  # Mostrar valores nas barras
+                text='Contagem',  # Mostrar valores nas barras
+                custom_data=['Contagem_Formatada']
             )
             # Formatação brasileira: ponto para milhares
             fig_parent.update_traces(
@@ -1361,6 +1444,10 @@ else:
                 height=500,
                 coloraxis_showscale=True,
                 coloraxis_colorbar=get_colorbar_layout(is_mobile=False)  # Desktop por padrão
+            )
+            aplicar_formatacao_eixo(fig_parent, df_parent_top['Contagem'].max(), eixo='x')
+            fig_parent.update_traces(
+                hovertemplate='<b>%{y}</b><br>Total: %{customdata[0]}<extra></extra>'
             )
             st.plotly_chart(fig_parent, use_container_width=True)
             
@@ -1382,6 +1469,7 @@ else:
         df_raca.columns = ['Raça/Cor', 'Contagem']
         df_raca = df_raca[~df_raca['Raça/Cor'].astype(str).str.contains('Ignorado|Branco|Não informado', case=False, na=False)]
         df_raca = df_raca.sort_values('Contagem', ascending=False)
+        df_raca['Contagem_Formatada'] = df_raca['Contagem'].apply(formatar_numero_br)
         
         if len(df_raca) > 0:
             fig_raca = px.bar(
@@ -1392,7 +1480,8 @@ else:
                 labels={'Raça/Cor': 'Raça/Cor', 'Contagem': 'Número de Notificações'},
                 color='Contagem',
                 color_continuous_scale='Viridis',  # Paleta mais escura e visível
-                height=500
+                height=500,
+                custom_data=['Contagem_Formatada']
             )
             fig_raca.update_xaxes(tickangle=45)
             # Layout responsivo: colorbar na lateral (desktop) por padrão
@@ -1402,6 +1491,10 @@ else:
                 height=500,
                 coloraxis_showscale=True,
                 coloraxis_colorbar=get_colorbar_layout(is_mobile=False)  # Desktop por padrão
+            )
+            aplicar_formatacao_eixo(fig_raca, df_raca['Contagem'].max(), eixo='y')
+            fig_raca.update_traces(
+                hovertemplate='<b>%{x}</b><br>Total: %{customdata[0]}<extra></extra>'
             )
             st.plotly_chart(fig_raca, use_container_width=True)
     
@@ -1413,6 +1506,7 @@ else:
         df_filtrado['MES_ANO'] = df_filtrado['DT_NOTIFIC'].dt.to_period('M').astype(str)
         df_mensal = df_filtrado.groupby('MES_ANO').size().reset_index(name='Total')
         df_mensal = df_mensal.sort_values('MES_ANO')
+        df_mensal['Total_Formatado'] = df_mensal['Total'].apply(formatar_numero_br)
         
         fig_mensal = px.line(
             df_mensal,
@@ -1429,6 +1523,11 @@ else:
             margin=dict(l=50, r=50, t=80, b=150),  # Mais espaço para rótulos inclinados
             height=500
         )
+        aplicar_formatacao_eixo(fig_mensal, df_mensal['Total'].max(), eixo='y')
+        fig_mensal.update_traces(
+            customdata=df_mensal['Total_Formatado'],
+            hovertemplate='<b>%{x}</b><br>Total: %{customdata}<extra></extra>'
+        )
         st.plotly_chart(fig_mensal, use_container_width=True)
     
     # Gráfico 11: Sazonalidade - REMOVIDO conforme solicitado
@@ -1441,6 +1540,7 @@ else:
         if 'UF_NOTIFIC' in df_filtrado.columns:
             df_regional = df_filtrado.groupby('UF_NOTIFIC').size().reset_index(name='Contagem')
             df_regional = df_regional.sort_values('Contagem', ascending=False).head(10)
+            df_regional['Contagem_Formatada'] = df_regional['Contagem'].apply(formatar_numero_br)
             
             fig_regional = px.bar(
                 df_regional,
@@ -1450,7 +1550,8 @@ else:
                 labels={'UF_NOTIFIC': 'Estado', 'Contagem': 'Total de Notificações'},
                 color='Contagem',
                 color_continuous_scale='Magma',  # Paleta mais escura e visível
-                height=500
+                height=500,
+                custom_data=['Contagem_Formatada']
             )
             fig_regional.update_xaxes(tickangle=45)
             # Layout responsivo: colorbar na lateral (desktop) por padrão
@@ -1460,6 +1561,10 @@ else:
                 height=500,
                 coloraxis_showscale=True,
                 coloraxis_colorbar=get_colorbar_layout(is_mobile=False)  # Desktop por padrão
+            )
+            aplicar_formatacao_eixo(fig_regional, df_regional['Contagem'].max(), eixo='y')
+            fig_regional.update_traces(
+                hovertemplate='<b>%{x}</b><br>Total: %{customdata[0]}<extra></extra>'
             )
             st.plotly_chart(fig_regional, use_container_width=True)
     
