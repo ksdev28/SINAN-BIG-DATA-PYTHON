@@ -1149,7 +1149,7 @@ if uf_selecionada != 'Todos':
     if municipio_selecionado != 'Todos':
         contexto_analise += f" | **Município:** {municipio_selecionado}"
 else:
-    contexto_analise = "**Análise:** Brasil (Todos os Estados)"
+    contexto_analise = "Brasil (Todos os Estados)"
 
 # Gráficos
 if df_filtrado.empty:
@@ -1820,7 +1820,6 @@ else:
     if uf_selecionada == 'Todos':
         st.markdown('<div class="section-header">4. Distribuição Geográfica por Município do Maranhão (H7)</div>', unsafe_allow_html=True)
         st.markdown("**H7 – Contribuição Estadual:** \"Imperatriz representa mais de 15% das notificações do Maranhão?\"")
-        st.markdown("**(Gráfico de Barras)**: Comparação entre municípios do Maranhão.")
         
         if 'MUNICIPIO_NOTIFIC' in df_filtrado.columns and 'UF_NOTIFIC' in df_filtrado.columns:
             # Filtrar apenas municípios do Maranhão
