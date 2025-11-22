@@ -342,6 +342,88 @@ RELACIONAMENTO_DICT = {
     'REL_ESPEC': 'Específico'
 }
 
+# Função centralizada para contar notificações de Imperatriz
+def contar_imperatriz(df, uf_filtro=None):
+    """
+    Conta notificações de Imperatriz de forma consistente.
+    
+    Args:
+        df: DataFrame com dados filtrados
+        uf_filtro: Se fornecido, filtra apenas esta UF antes de contar
+    
+    Returns:
+        dict com: {
+            'contagem': int,
+            'total_uf': int (se uf_filtro fornecido),
+            'percentual': float (se uf_filtro fornecido),
+            'encontrado': bool
+        }
+    """
+    if df is None or len(df) == 0:
+        return {'contagem': 0, 'total_uf': 0, 'percentual': 0.0, 'encontrado': False}
+    
+    # Filtrar por UF se fornecido
+    if uf_filtro:
+        df_uf = df[df['UF_NOTIFIC'] == uf_filtro].copy()
+        total_uf = len(df_uf)
+    else:
+        df_uf = df.copy()
+        total_uf = len(df_uf)
+    
+    if len(df_uf) == 0:
+        return {'contagem': 0, 'total_uf': 0, 'percentual': 0.0, 'encontrado': False}
+    
+    # Normalizar busca de Imperatriz - IMPORTANTE: buscar apenas "Imperatriz" exato
+    # NÃO incluir "Santo Amaro da Imperatriz" ou outras variações
+    # Usar regex para garantir que seja apenas "Imperatriz" (não seguido de outras palavras)
+    df_uf_str = df_uf['MUNICIPIO_NOTIFIC'].astype(str)
+    imperatriz_mask = (
+        # Match exato "Imperatriz" (com ou sem espaços)
+        (df_uf_str.str.strip() == 'Imperatriz') |
+        # Match "Imperatriz / UF" (mas não "Santo Amaro da Imperatriz")
+        (df_uf_str.str.match(r'^Imperatriz\s*/\s*[A-Z]{2}$', case=False, na=False)) |
+        # Match "Imperatriz" seguido apenas de espaços e barra
+        (df_uf_str.str.match(r'^Imperatriz\s*/', case=False, na=False))
+    ) & (
+        # EXCLUIR "Santo Amaro da Imperatriz" explicitamente
+        ~df_uf_str.str.contains('Santo Amaro', case=False, na=False)
+    )
+    
+    # Filtrar registros de Imperatriz
+    df_imperatriz = df_uf[imperatriz_mask].copy()
+    
+    if len(df_imperatriz) == 0:
+        return {'contagem': 0, 'total_uf': total_uf, 'percentual': 0.0, 'encontrado': False}
+    
+    # IMPORTANTE: Contar registros únicos usando um identificador único se disponível
+    # Se não houver ID único, contar linhas (cada linha = uma notificação)
+    # Verificar se há coluna de ID único
+    if 'REGISTRO_ID_ORIGINAL' in df_imperatriz.columns:
+        # Contar IDs únicos para evitar duplicatas
+        contagem = df_imperatriz['REGISTRO_ID_ORIGINAL'].nunique()
+    else:
+        # Contar linhas (cada linha é uma notificação)
+        # IMPORTANTE: Se não houver ID único, cada linha já é um registro único
+        contagem = len(df_imperatriz)
+    
+    # Log para debug
+    nomes_unicos = df_imperatriz['MUNICIPIO_NOTIFIC'].unique()
+    print(f"[DEBUG contar_imperatriz] Contagem: {contagem}, Variações de nome: {len(nomes_unicos)}, Nomes: {nomes_unicos}")
+    
+    if len(nomes_unicos) > 1:
+        # Há variações no nome - logar para investigação
+        print(f"[DEBUG] Imperatriz encontrado com {len(nomes_unicos)} variações de nome: {nomes_unicos}")
+    
+    # Calcular percentual se houver total da UF
+    percentual = (contagem / total_uf * 100) if total_uf > 0 else 0.0
+    
+    return {
+        'contagem': contagem,
+        'total_uf': total_uf,
+        'percentual': percentual,
+        'encontrado': True
+    }
+
 # Classe auxiliar para dados pré-processados (deve estar no nível do módulo para serialização)
 class MinimalProcessor:
     """Processador mínimo para compatibilidade com dados pré-processados"""
@@ -1099,6 +1181,25 @@ if 'TIPO_VIOLENCIA' in df_filtrado.columns:
 else:
     tipo_selecionado = 'Todos'
 
+# Verificação de Consistência: Contagem de Imperatriz (Debug)
+# Esta seção ajuda a identificar inconsistências nos dados
+if 'MUNICIPIO_NOTIFIC' in df_filtrado.columns and 'UF_NOTIFIC' in df_filtrado.columns:
+    # Contar Imperatriz de forma centralizada
+    imperatriz_debug = contar_imperatriz(df_filtrado)
+    if imperatriz_debug['encontrado']:
+        # Verificar também no Maranhão especificamente
+        imperatriz_ma = contar_imperatriz(df_filtrado, uf_filtro='Maranhão')
+        
+        # Exibir apenas se houver diferença significativa ou se estiver em modo debug
+        # (Comentado por padrão para não poluir a interface)
+        # with st.expander("🔍 Debug: Verificação de Consistência - Imperatriz", expanded=False):
+        #     st.write(f"**Contagem Total de Imperatriz (todos os filtros):** {formatar_numero_br(imperatriz_debug['contagem'])}")
+        #     if imperatriz_ma['encontrado']:
+        #         st.write(f"**Contagem de Imperatriz no Maranhão:** {formatar_numero_br(imperatriz_ma['contagem'])}")
+        #         st.write(f"**Percentual no MA:** {imperatriz_ma['percentual']:.2f}%")
+        #         st.write(f"**Total de notificações no MA:** {formatar_numero_br(imperatriz_ma['total_uf'])}")
+        pass
+
 # Indicadores Chave (KPIs)
 st.markdown('<div class="section-header">Indicadores Principais</div>', unsafe_allow_html=True)
 
@@ -1825,11 +1926,18 @@ else:
             df_ma = df_filtrado[df_filtrado['UF_NOTIFIC'] == 'Maranhão'].copy() if 'Maranhão' in df_filtrado['UF_NOTIFIC'].values else pd.DataFrame()
             
             if len(df_ma) > 0:
-                # Agrupar por município
-                df_municipios_ma = df_ma.groupby('MUNICIPIO_NOTIFIC').size().reset_index(name='Contagem')
+                # Agrupar por município - usar nunique() se houver ID único para evitar duplicatas
+                # IMPORTANTE: Usar observed=True para evitar problemas com categorias
+                if 'REGISTRO_ID_ORIGINAL' in df_ma.columns:
+                    df_municipios_ma = df_ma.groupby('MUNICIPIO_NOTIFIC', observed=True)['REGISTRO_ID_ORIGINAL'].nunique().reset_index(name='Contagem')
+                else:
+                    df_municipios_ma = df_ma.groupby('MUNICIPIO_NOTIFIC', observed=True).size().reset_index(name='Contagem')
                 
-                # Calcular total do Maranhão
-                total_ma = len(df_ma)
+                # Calcular total do Maranhão (registros únicos se houver ID)
+                if 'REGISTRO_ID_ORIGINAL' in df_ma.columns:
+                    total_ma = df_ma['REGISTRO_ID_ORIGINAL'].nunique()
+                else:
+                    total_ma = len(df_ma)
                 
                 # Calcular percentuais em relação ao total do Maranhão
                 df_municipios_ma['Percentual'] = (df_municipios_ma['Contagem'] / total_ma * 100).round(1)
@@ -1839,14 +1947,23 @@ else:
                 # IMPORTANTE: Ordenar por contagem ANTES de calcular posição
                 df_municipios_ma = df_municipios_ma.sort_values('Contagem', ascending=False).reset_index(drop=True)
                 
+                # Usar função centralizada para contar Imperatriz de forma consistente
+                imperatriz_info = contar_imperatriz(df_ma, uf_filtro='Maranhão')
+                
                 # Encontrar posição de Imperatriz no ranking completo (após ordenação)
-                imperatriz_mask = df_municipios_ma['MUNICIPIO_NOTIFIC'].str.contains('Imperatriz', case=False, na=False)
+                # IMPORTANTE: Buscar apenas "Imperatriz" exato, não "Santo Amaro da Imperatriz"
+                imperatriz_mask = (
+                    (df_municipios_ma['MUNICIPIO_NOTIFIC'].astype(str).str.strip() == 'Imperatriz') |
+                    (df_municipios_ma['MUNICIPIO_NOTIFIC'].astype(str).str.match(r'^Imperatriz\s*/', case=False, na=False))
+                ) & (
+                    ~df_municipios_ma['MUNICIPIO_NOTIFIC'].astype(str).str.contains('Santo Amaro', case=False, na=False)
+                )
                 imperatriz_data = df_municipios_ma[imperatriz_mask]
                 
                 # Inicializar variáveis
                 posicao_imperatriz = None
-                contagem_imperatriz = 0
-                pct_imperatriz = 0
+                contagem_imperatriz = imperatriz_info['contagem']  # Usar contagem centralizada
+                pct_imperatriz = imperatriz_info['percentual']  # Usar percentual centralizado
                 
                 # Identificar o município líder (primeiro do ranking)
                 municipio_lider = None
@@ -1857,15 +1974,21 @@ else:
                     contagem_lider = df_municipios_ma.iloc[0]['Contagem']
                     pct_lider = df_municipios_ma.iloc[0]['Percentual']
                 
-                if len(imperatriz_data) > 0:
+                if imperatriz_info['encontrado'] and len(imperatriz_data) > 0:
                     # Posição no ranking completo (índice + 1, pois começa em 0)
                     # Usar o índice do DataFrame já ordenado
                     posicao_imperatriz = df_municipios_ma[imperatriz_mask].index[0] + 1
-                    contagem_imperatriz = imperatriz_data.iloc[0]['Contagem']
-                    pct_imperatriz = imperatriz_data.iloc[0]['Percentual']
+                    # Usar valores da função centralizada para garantir consistência
+                    contagem_imperatriz = imperatriz_info['contagem']
+                    pct_imperatriz = imperatriz_info['percentual']
                     
-                    # Destacar Imperatriz no gráfico
-                    df_municipios_ma['Destaque'] = df_municipios_ma['MUNICIPIO_NOTIFIC'].str.contains('Imperatriz', case=False, na=False)
+                    # Destacar Imperatriz no gráfico (apenas "Imperatriz", não "Santo Amaro")
+                    df_municipios_ma['Destaque'] = (
+                        (df_municipios_ma['MUNICIPIO_NOTIFIC'].astype(str).str.strip() == 'Imperatriz') |
+                        (df_municipios_ma['MUNICIPIO_NOTIFIC'].astype(str).str.match(r'^Imperatriz\s*/', case=False, na=False))
+                    ) & (
+                        ~df_municipios_ma['MUNICIPIO_NOTIFIC'].astype(str).str.contains('Santo Amaro', case=False, na=False)
+                    )
                     
                     # Exibir KPIs em colunas
                     col_h7_1, col_h7_2, col_h7_3 = st.columns(3)
@@ -1904,32 +2027,89 @@ else:
                             delta=f"{formatar_numero_br(contagem_lider)} ({pct_lider:.1f}%)" if municipio_lider else None
                         )
                 
-                # Pegar top 10 municípios para o gráfico, mas garantir que Imperatriz esteja incluída
-                # As colunas formatadas já foram criadas acima, então copiar tudo
-                num_municipios = min(10, len(df_municipios_ma))
-                df_municipios_ma_top = df_municipios_ma.head(num_municipios).copy()
+                # IMPORTANTE: Garantir que Imperatriz use SEMPRE os valores da função centralizada
+                # Primeiro, remover Imperatriz do DataFrame agrupado se existir (para evitar valores incorretos)
+                # IMPORTANTE: Remover apenas "Imperatriz" exato, não "Santo Amaro da Imperatriz"
+                imperatriz_mask_remover = (
+                    (df_municipios_ma['MUNICIPIO_NOTIFIC'].astype(str).str.strip() == 'Imperatriz') |
+                    (df_municipios_ma['MUNICIPIO_NOTIFIC'].astype(str).str.match(r'^Imperatriz\s*/', case=False, na=False))
+                ) & (
+                    ~df_municipios_ma['MUNICIPIO_NOTIFIC'].astype(str).str.contains('Santo Amaro', case=False, na=False)
+                )
+                df_municipios_ma_sem_imperatriz = df_municipios_ma[~imperatriz_mask_remover].copy()
                 
-                # Se Imperatriz não estiver no top, adicioná-la ao gráfico
-                if len(imperatriz_data) > 0:
-                    imperatriz_no_top = df_municipios_ma_top['MUNICIPIO_NOTIFIC'].str.contains('Imperatriz', case=False, na=False).any()
-                    if not imperatriz_no_top:
-                        # Adicionar Imperatriz ao gráfico
-                        imperatriz_row = df_municipios_ma[imperatriz_mask].iloc[0:1].copy()
-                        imperatriz_row['Destaque'] = True  # Garantir que está destacada
-                        df_municipios_ma_top = pd.concat([df_municipios_ma_top, imperatriz_row], ignore_index=True)
-                        # Reordenar após adicionar Imperatriz
-                        df_municipios_ma_top = df_municipios_ma_top.sort_values('Contagem', ascending=False).reset_index(drop=True)
-                        num_municipios = len(df_municipios_ma_top)
+                # Pegar top 10 municípios (sem Imperatriz)
+                num_municipios = min(10, len(df_municipios_ma_sem_imperatriz))
+                df_municipios_ma_top = df_municipios_ma_sem_imperatriz.head(num_municipios).copy()
+                
+                # SEMPRE adicionar Imperatriz com valores corretos da função centralizada
+                if imperatriz_info['encontrado']:
+                    # Encontrar o nome exato do município (pode variar)
+                    nome_imperatriz = 'Imperatriz'
+                    if len(imperatriz_data) > 0:
+                        nome_imperatriz = imperatriz_data.iloc[0]['MUNICIPIO_NOTIFIC']
+                    else:
+                        # Tentar encontrar no DataFrame completo
+                        imperatriz_no_df = df_municipios_ma[imperatriz_mask]
+                        if len(imperatriz_no_df) > 0:
+                            nome_imperatriz = imperatriz_no_df.iloc[0]['MUNICIPIO_NOTIFIC']
                     
-                    # Garantir que a coluna Destaque existe no top
+                    # Criar linha com valores EXATOS da função centralizada
+                    imperatriz_row = pd.DataFrame({
+                        'MUNICIPIO_NOTIFIC': [nome_imperatriz],
+                        'Contagem': [contagem_imperatriz],  # SEMPRE usar contagem centralizada (440)
+                        'Percentual': [pct_imperatriz],  # SEMPRE usar percentual centralizado
+                        'Percentual_Formatado': [f"{pct_imperatriz:.1f}%"],
+                        'Contagem_Formatada': [formatar_numero_br(contagem_imperatriz)],
+                        'Destaque': [True]
+                    })
+                    
+                    # Adicionar Imperatriz ao gráfico
+                    df_municipios_ma_top = pd.concat([df_municipios_ma_top, imperatriz_row], ignore_index=True)
+                    # Reordenar após adicionar Imperatriz
+                    df_municipios_ma_top = df_municipios_ma_top.sort_values('Contagem', ascending=False).reset_index(drop=True)
+                    num_municipios = len(df_municipios_ma_top)
+                    
+                    # Garantir que a coluna Destaque existe no top (apenas "Imperatriz", não "Santo Amaro")
                     if 'Destaque' not in df_municipios_ma_top.columns:
-                        df_municipios_ma_top['Destaque'] = df_municipios_ma_top['MUNICIPIO_NOTIFIC'].str.contains('Imperatriz', case=False, na=False)
+                        df_municipios_ma_top['Destaque'] = (
+                            (df_municipios_ma_top['MUNICIPIO_NOTIFIC'].astype(str).str.strip() == 'Imperatriz') |
+                            (df_municipios_ma_top['MUNICIPIO_NOTIFIC'].astype(str).str.match(r'^Imperatriz\s*/', case=False, na=False))
+                        ) & (
+                            ~df_municipios_ma_top['MUNICIPIO_NOTIFIC'].astype(str).str.contains('Santo Amaro', case=False, na=False)
+                        )
                 else:
                     # Se não houver Imperatriz, criar coluna Destaque com False
                     df_municipios_ma_top['Destaque'] = False
                 
                 # IMPORTANTE: Recalcular TODOS os valores para garantir consistência
+                # Recalcular total_ma se houver ID único para garantir consistência
+                if 'REGISTRO_ID_ORIGINAL' in df_ma.columns:
+                    total_ma = df_ma['REGISTRO_ID_ORIGINAL'].nunique()
+                else:
+                    total_ma = len(df_ma)
+                
                 # Recalcular percentuais usando o total_ma (total do Maranhão)
+                df_municipios_ma_top['Percentual'] = (df_municipios_ma_top['Contagem'] / total_ma * 100).round(1)
+                
+                # VALIDAÇÃO FINAL: Garantir que Imperatriz tenha exatamente o valor da função centralizada
+                # IMPORTANTE: Fazer ANTES de criar o gráfico
+                if imperatriz_info['encontrado']:
+                    imperatriz_mask_final = (
+                        (df_municipios_ma_top['MUNICIPIO_NOTIFIC'].astype(str).str.strip() == 'Imperatriz') |
+                        (df_municipios_ma_top['MUNICIPIO_NOTIFIC'].astype(str).str.match(r'^Imperatriz\s*/', case=False, na=False))
+                    ) & (
+                        ~df_municipios_ma_top['MUNICIPIO_NOTIFIC'].astype(str).str.contains('Santo Amaro', case=False, na=False)
+                    )
+                    imperatriz_idx_final = df_municipios_ma_top[imperatriz_mask_final].index
+                    if len(imperatriz_idx_final) > 0:
+                        idx_final = imperatriz_idx_final[0]
+                        # FORÇAR valores corretos
+                        df_municipios_ma_top.loc[idx_final, 'Contagem'] = contagem_imperatriz
+                        df_municipios_ma_top.loc[idx_final, 'Percentual'] = pct_imperatriz
+                        print(f"[DEBUG H7 FINAL] Valores de Imperatriz FORÇADOS: Contagem={contagem_imperatriz}, Percentual={pct_imperatriz:.2f}%")
+                
+                # Recalcular percentuais após validação de Imperatriz
                 df_municipios_ma_top['Percentual'] = (df_municipios_ma_top['Contagem'] / total_ma * 100).round(1)
                 
                 # Recalcular todas as colunas formatadas
@@ -1939,9 +2119,30 @@ else:
                 # Ordenar por contagem (decrescente) - maior no topo
                 df_municipios_ma_top = df_municipios_ma_top.sort_values('Contagem', ascending=False).reset_index(drop=True)
                 
+                # Criar texto completo para exibir nas barras
+                df_municipios_ma_top['Texto_Completo'] = df_municipios_ma_top.apply(
+                    lambda row: f"{row['Contagem_Formatada']} ({row['Percentual_Formatado']})", axis=1
+                )
+                
+                # Debug: Verificar todos os valores ANTES de criar o gráfico
+                print(f"[DEBUG H7] DataFrame completo ANTES de criar gráfico:")
+                print(df_municipios_ma_top[['MUNICIPIO_NOTIFIC', 'Contagem', 'Contagem_Formatada']].to_string())
+                
                 # Criar gráfico de barras horizontal (mais legível para muitos municípios)
+                # IMPORTANTE: Ordenar para gráfico horizontal (menor no topo, maior embaixo)
+                df_municipios_ma_top_grafico = df_municipios_ma_top.sort_values('Contagem', ascending=True).reset_index(drop=True)
+                
+                # Debug: Verificar ordem dos dados antes de criar gráfico
+                print(f"[DEBUG H7] Ordem dos municípios no DataFrame (índice -> município -> contagem):")
+                for idx, row in df_municipios_ma_top_grafico.iterrows():
+                    print(f"  {idx}: {row['MUNICIPIO_NOTIFIC']} -> {row['Contagem']}")
+                
+                # Criar gráfico - ordenar por contagem (decrescente) para gráfico horizontal
+                # No gráfico horizontal, queremos maior no topo, então ordenamos decrescente
+                df_municipios_ma_top_grafico = df_municipios_ma_top_grafico.sort_values('Contagem', ascending=False).reset_index(drop=True)
+                
                 fig_geo = px.bar(
-                    df_municipios_ma_top,
+                    df_municipios_ma_top_grafico,
                     x='Contagem',
                     y='MUNICIPIO_NOTIFIC',
                     orientation='h',  # Gráfico horizontal
@@ -1950,27 +2151,22 @@ else:
                     height=500,
                     color='Destaque',  # Destacar Imperatriz
                     color_discrete_map={True: '#C73E1D', False: '#2E86AB'},  # Vermelho para Imperatriz, azul para outros
-                    category_orders={'MUNICIPIO_NOTIFIC': df_municipios_ma_top['MUNICIPIO_NOTIFIC'].tolist()},  # Manter ordem do ranking (maior no topo)
-                    custom_data=['Contagem_Formatada', 'Percentual_Formatado']  # Passar nomes de colunas, não valores
+                    custom_data=['Contagem_Formatada', 'Percentual_Formatado']  # Para hover apenas
                 )
+                # Ordenar por contagem decrescente (maior no topo)
                 fig_geo.update_layout(
                     margin=dict(l=200, r=50, t=80, b=50),  # Espaço à esquerda para nomes dos municípios
                     height=500,
                     showlegend=False,  # Não precisa de legenda
-                    yaxis={'categoryorder': 'array', 'categoryarray': df_municipios_ma_top['MUNICIPIO_NOTIFIC'].tolist()}  # Manter ordem: maior no topo
+                    yaxis={'categoryorder': 'total ascending'}  # Ordenar por valor total (menor no topo, maior embaixo)
                 )
-                aplicar_formatacao_eixo(fig_geo, df_municipios_ma_top['Contagem'].max(), eixo='x')
+                aplicar_formatacao_eixo(fig_geo, df_municipios_ma_top_grafico['Contagem'].max(), eixo='x')
                 
-                # Adicionar números e porcentagens nas barras
-                # IMPORTANTE: Recalcular o texto usando os valores atualizados
-                df_municipios_ma_top['Texto_Completo'] = df_municipios_ma_top.apply(
-                    lambda row: f"{row['Contagem_Formatada']} ({row['Percentual_Formatado']})", axis=1
-                )
+                # REMOVER texto das barras - apenas hover
                 fig_geo.update_traces(
                     hovertemplate='<b>%{y}</b><br>Total: %{customdata[0]}<br>Percentual do MA: %{customdata[1]}<extra></extra>',
-                    text=df_municipios_ma_top['Texto_Completo'].values,
-                    textposition='outside',
-                    textfont=dict(size=9)
+                    text=None,  # Remover texto das barras
+                    textposition=None
                 )
                 st.plotly_chart(fig_geo, use_container_width=True)
                 
@@ -1988,33 +2184,125 @@ else:
         st.markdown("**(Gráfico de Barras)**: Comparação entre municípios.")
         
         if 'MUNICIPIO_NOTIFIC' in df_filtrado.columns:
-            df_municipio = df_filtrado.groupby('MUNICIPIO_NOTIFIC').size().reset_index(name='Contagem')
-            df_municipio = df_municipio.sort_values('Contagem', ascending=False).head(10)  # Top 10 municípios
-            total_municipios = df_municipio['Contagem'].sum()
-            df_municipio['Percentual'] = (df_municipio['Contagem'] / total_municipios * 100).round(1)
-            df_municipio['Percentual_Formatado'] = df_municipio['Percentual'].apply(lambda x: f"{x:.1f}%")
-            df_municipio['Contagem_Formatada'] = df_municipio['Contagem'].apply(formatar_numero_br)
+            # SIMPLIFICAR: Fazer groupby completo, ordenar, pegar top 10, e apenas CORRIGIR Imperatriz
+            # Calcular KPI para H6 (Imperatriz vs outros) - PRIMEIRO usar função centralizada
+            imperatriz_info = contar_imperatriz(df_filtrado, uf_filtro=uf_selecionada if uf_selecionada != 'Todos' else None)
             
-            # Calcular KPI para H6 (Imperatriz vs outros)
-            # Primeiro ordenar por contagem para calcular posição correta
-            df_municipio_rank = df_municipio.sort_values('Contagem', ascending=False).reset_index(drop=True)
-            imperatriz_data = df_municipio_rank[df_municipio_rank['MUNICIPIO_NOTIFIC'].str.contains('Imperatriz', case=False, na=False)]
-            if len(imperatriz_data) > 0:
-                posicao_imperatriz = df_municipio_rank[df_municipio_rank['MUNICIPIO_NOTIFIC'].str.contains('Imperatriz', case=False, na=False)].index[0] + 1
-                contagem_imperatriz = imperatriz_data.iloc[0]['Contagem']
-                media_top10 = df_municipio_rank.head(10)['Contagem'].mean()
+            # Agrupar por município - fazer groupby COMPLETO primeiro
+            # IMPORTANTE: Usar observed=True para evitar problemas com categorias
+            if 'REGISTRO_ID_ORIGINAL' in df_filtrado.columns:
+                df_municipio = df_filtrado.groupby('MUNICIPIO_NOTIFIC', observed=True)['REGISTRO_ID_ORIGINAL'].nunique().reset_index(name='Contagem')
+            else:
+                df_municipio = df_filtrado.groupby('MUNICIPIO_NOTIFIC', observed=True).size().reset_index(name='Contagem')
+            
+            # Ordenar por contagem (decrescente) e pegar top 10
+            df_municipio = df_municipio.sort_values('Contagem', ascending=False).reset_index(drop=True).head(10)
+            
+            # Debug: Verificar valores ANTES de corrigir Imperatriz
+            print(f"[DEBUG H6] Top 10 ANTES de corrigir Imperatriz:")
+            print(df_municipio[['MUNICIPIO_NOTIFIC', 'Contagem']].to_string())
+            
+            # Se Imperatriz estiver no top 10, SUBSTITUIR seu valor pelo valor correto
+            if imperatriz_info['encontrado']:
+                contagem_imperatriz = imperatriz_info['contagem']
+                # Buscar apenas "Imperatriz" exato (não "Santo Amaro da Imperatriz")
+                imperatriz_mask = (
+                    (df_municipio['MUNICIPIO_NOTIFIC'].astype(str).str.strip() == 'Imperatriz') |
+                    (df_municipio['MUNICIPIO_NOTIFIC'].astype(str).str.match(r'^Imperatriz\s*/', case=False, na=False))
+                ) & (
+                    ~df_municipio['MUNICIPIO_NOTIFIC'].astype(str).str.contains('Santo Amaro', case=False, na=False)
+                )
+                
+                if imperatriz_mask.any():
+                    # Imperatriz já está no top 10 - apenas CORRIGIR o valor
+                    idx_imperatriz = df_municipio[imperatriz_mask].index[0]
+                    df_municipio.loc[idx_imperatriz, 'Contagem'] = contagem_imperatriz
+                    # Reordenar após correção
+                    df_municipio = df_municipio.sort_values('Contagem', ascending=False).reset_index(drop=True)
+                else:
+                    # Imperatriz não está no top 10 - adicionar com valor correto
+                    nome_imperatriz = 'Imperatriz'
+                    # Encontrar nome exato se existir no DataFrame completo (apenas "Imperatriz", não "Santo Amaro")
+                    if 'REGISTRO_ID_ORIGINAL' in df_filtrado.columns:
+                        df_municipio_temp = df_filtrado.groupby('MUNICIPIO_NOTIFIC', observed=True)['REGISTRO_ID_ORIGINAL'].nunique().reset_index(name='Contagem')
+                    else:
+                        df_municipio_temp = df_filtrado.groupby('MUNICIPIO_NOTIFIC', observed=True).size().reset_index(name='Contagem')
+                    imperatriz_mask_temp = (
+                        (df_municipio_temp['MUNICIPIO_NOTIFIC'].astype(str).str.strip() == 'Imperatriz') |
+                        (df_municipio_temp['MUNICIPIO_NOTIFIC'].astype(str).str.match(r'^Imperatriz\s*/', case=False, na=False))
+                    ) & (
+                        ~df_municipio_temp['MUNICIPIO_NOTIFIC'].astype(str).str.contains('Santo Amaro', case=False, na=False)
+                    )
+                    imperatriz_no_completo = df_municipio_temp[imperatriz_mask_temp]
+                    if len(imperatriz_no_completo) > 0:
+                        nome_imperatriz = imperatriz_no_completo.iloc[0]['MUNICIPIO_NOTIFIC']
+                    
+                    imperatriz_row = pd.DataFrame({
+                        'MUNICIPIO_NOTIFIC': [nome_imperatriz],
+                        'Contagem': [contagem_imperatriz]
+                    })
+                    df_municipio = pd.concat([df_municipio, imperatriz_row], ignore_index=True)
+                    df_municipio = df_municipio.sort_values('Contagem', ascending=False).reset_index(drop=True).head(10)
+                
+                # Calcular posição no ranking completo
+                if 'REGISTRO_ID_ORIGINAL' in df_filtrado.columns:
+                    df_municipio_completo = df_filtrado.groupby('MUNICIPIO_NOTIFIC', observed=True)['REGISTRO_ID_ORIGINAL'].nunique().reset_index(name='Contagem')
+                else:
+                    df_municipio_completo = df_filtrado.groupby('MUNICIPIO_NOTIFIC', observed=True).size().reset_index(name='Contagem')
+                df_municipio_completo = df_municipio_completo.sort_values('Contagem', ascending=False).reset_index(drop=True)
+                # Corrigir valor de Imperatriz no ranking completo também (apenas "Imperatriz", não "Santo Amaro")
+                imperatriz_mask_completo = (
+                    (df_municipio_completo['MUNICIPIO_NOTIFIC'].astype(str).str.strip() == 'Imperatriz') |
+                    (df_municipio_completo['MUNICIPIO_NOTIFIC'].astype(str).str.match(r'^Imperatriz\s*/', case=False, na=False))
+                ) & (
+                    ~df_municipio_completo['MUNICIPIO_NOTIFIC'].astype(str).str.contains('Santo Amaro', case=False, na=False)
+                )
+                if imperatriz_mask_completo.any():
+                    idx_imperatriz_completo = df_municipio_completo[imperatriz_mask_completo].index[0]
+                    df_municipio_completo.loc[idx_imperatriz_completo, 'Contagem'] = contagem_imperatriz
+                    df_municipio_completo = df_municipio_completo.sort_values('Contagem', ascending=False).reset_index(drop=True)
+                    imperatriz_mask_pos = (
+                        (df_municipio_completo['MUNICIPIO_NOTIFIC'].astype(str).str.strip() == 'Imperatriz') |
+                        (df_municipio_completo['MUNICIPIO_NOTIFIC'].astype(str).str.match(r'^Imperatriz\s*/', case=False, na=False))
+                    ) & (
+                        ~df_municipio_completo['MUNICIPIO_NOTIFIC'].astype(str).str.contains('Santo Amaro', case=False, na=False)
+                    )
+                    if imperatriz_mask_pos.any():
+                        posicao_imperatriz = df_municipio_completo[imperatriz_mask_pos].index[0] + 1
+                    else:
+                        posicao_imperatriz = None
+                else:
+                    posicao_imperatriz = None
+                
+                # Calcular média do top 10
+                media_top10 = df_municipio['Contagem'].mean() if len(df_municipio) > 0 else 0
                 variacao_vs_media = ((contagem_imperatriz - media_top10) / media_top10 * 100) if media_top10 > 0 else 0
                 
                 col_h6 = st.columns(1)[0]
                 with col_h6:
-                    st.metric(
-                        "Posição de Imperatriz (H6)",
-                        f"{posicao_imperatriz}º lugar",
-                        delta=f"{variacao_vs_media:+.1f}% vs média top 10"
-                    )
+                    if posicao_imperatriz:
+                        st.metric(
+                            "Posição de Imperatriz (H6)",
+                            f"{posicao_imperatriz}º lugar",
+                            delta=f"{variacao_vs_media:+.1f}% vs média top 10"
+                        )
+                    else:
+                        st.metric(
+                            "Notificações de Imperatriz (H6)",
+                            formatar_numero_br(contagem_imperatriz),
+                            delta="Dados disponíveis"
+                        )
+            else:
+                st.info("Imperatriz não encontrada nos dados filtrados.")
             
-            # Ordenar por contagem (decrescente) para o gráfico
-            df_municipio = df_municipio.sort_values('Contagem', ascending=True)  # Ascendente para gráfico horizontal
+            # Calcular percentuais e formatações
+            total_municipios = df_municipio['Contagem'].sum()
+            df_municipio['Percentual'] = (df_municipio['Contagem'] / total_municipios * 100).round(1) if total_municipios > 0 else 0
+            df_municipio['Percentual_Formatado'] = df_municipio['Percentual'].apply(lambda x: f"{x:.1f}%")
+            df_municipio['Contagem_Formatada'] = df_municipio['Contagem'].apply(formatar_numero_br)
+            
+            # Ordenar por contagem (decrescente) para gráfico horizontal
+            df_municipio = df_municipio.sort_values('Contagem', ascending=False).reset_index(drop=True)
             
             fig_mun_bar = px.bar(
                 df_municipio,
@@ -2024,19 +2312,29 @@ else:
                 title=f'Top 10 Municípios com Mais Notificações ({uf_selecionada})',
                 labels={'MUNICIPIO_NOTIFIC': 'Município', 'Contagem': 'Contagem de Notificações'},
                 height=500,
-                custom_data=['Contagem_Formatada', 'Percentual_Formatado']
+                custom_data=['Contagem_Formatada', 'Percentual_Formatado']  # Para hover apenas
             )
+            # Ordenar por contagem (menor no topo, maior embaixo)
             fig_mun_bar.update_layout(
                 margin=dict(l=200, r=50, t=80, b=50),  # Espaço à esquerda para nomes dos municípios
-                height=500
+                height=500,
+                yaxis={'categoryorder': 'total ascending'}  # Ordenar por valor total (menor no topo, maior embaixo)
             )
             aplicar_formatacao_eixo(fig_mun_bar, df_municipio['Contagem'].max(), eixo='x')
+            
+            # REMOVER completamente texto das barras - apenas hover
+            # Atualizar todos os traces para remover texto
             fig_mun_bar.update_traces(
+                text=None,
+                textposition=None,
                 hovertemplate='<b>%{y}</b><br>Total: %{customdata[0]}<br>Percentual: %{customdata[1]}<extra></extra>',
-                text=df_municipio['Percentual_Formatado'].values,
-                textposition='outside',
-                textfont=dict(size=9)
+                selector=dict(type='bar')  # Aplicar apenas a barras
             )
+            
+            # Garantir que não há texto definido em nenhum lugar
+            for trace in fig_mun_bar.data:
+                trace.text = None
+                trace.textposition = None
             st.plotly_chart(fig_mun_bar, use_container_width=True)
         else:
             st.info("Dados de município não disponíveis para este gráfico")
@@ -2470,12 +2768,16 @@ else:
             if 'MUNICIPIO_UF' not in df_municipios.columns or df_municipios['MUNICIPIO_UF'].isna().any():
                 df_municipios['MUNICIPIO_UF'] = df_municipios['MUNICIPIO_NOTIFIC'].astype(str) + ' / ' + df_municipios['UF_NOTIFIC'].astype(str)
             
-            # Encontrar Imperatriz
+            # Usar função centralizada para contar Imperatriz de forma consistente
+            imperatriz_info = contar_imperatriz(df_filtrado)
+            
+            # Encontrar Imperatriz no DataFrame agrupado para posicionamento
             imperatriz_mask = df_municipios['MUNICIPIO_NOTIFIC'].str.contains('Imperatriz', case=False, na=False)
             imperatriz_data = df_municipios[imperatriz_mask]
             
-            if len(imperatriz_data) > 0:
-                contagem_imperatriz = imperatriz_data.iloc[0]['Contagem']
+            if imperatriz_info['encontrado']:
+                # Usar contagem centralizada para garantir consistência
+                contagem_imperatriz = imperatriz_info['contagem']
                 
                 # Encontrar municípios de tamanho semelhante (±30% do valor de Imperatriz)
                 limite_inferior = contagem_imperatriz * 0.7  # 70% = -30%
@@ -2566,14 +2868,17 @@ else:
                 
                 aplicar_formatacao_eixo(fig_h6, df_similares_display['Contagem'].max(), eixo='x')
                 
-                # Adicionar números nas barras
-                df_similares_display['Texto_Completo'] = df_similares_display['Contagem_Formatada']
+                # REMOVER números das barras - apenas hover
                 fig_h6.update_traces(
                     hovertemplate='<b>%{y}</b><br>Total: %{customdata[0]}<extra></extra>',
-                    text=df_similares_display['Texto_Completo'].values,
-                    textposition='outside',
-                    textfont=dict(size=9)
+                    text=None,
+                    textposition=None
                 )
+                
+                # Garantir que não há texto definido em nenhum lugar
+                for trace in fig_h6.data:
+                    trace.text = None
+                    trace.textposition = None
                 
                 st.plotly_chart(fig_h6, use_container_width=True)
                 
