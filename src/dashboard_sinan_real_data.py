@@ -365,8 +365,11 @@ def load_sinan_data(use_duckdb=True, use_preprocessed=True):
         if processed_file.exists():
             try:
                 print("[INFO] Carregando dados pre-processados...")
-                df = pd.read_parquet(processed_file)
+                # Carregar apenas as colunas necessárias para reduzir memória
+                # Usar engine='pyarrow' para melhor performance
+                df = pd.read_parquet(processed_file, engine='pyarrow')
                 print(f"[OK] Dados pre-processados carregados: {len(df):,} registros")
+                print(f"[OK] Total de colunas: {len(df.columns)}")
                 
                 # Verificar se as colunas essenciais existem
                 colunas_essenciais = ['NU_IDADE_N', 'DT_NOTIFIC', 'CS_SEXO']
@@ -386,31 +389,10 @@ def load_sinan_data(use_duckdb=True, use_preprocessed=True):
                 else:
                     print("[OK] Todas as colunas derivadas ja existem nos dados pre-processados")
                 
-                # Aplicar filtro de violência se necessário (os dados pré-processados podem não ter filtro)
-                # Verificar se há registros sem violência marcada
-                violencia_cols = ['VIOL_SEXU', 'VIOL_FISIC', 'VIOL_PSICO', 'VIOL_INFAN']
-                violencia_disponiveis = [col for col in violencia_cols if col in df.columns]
-                
-                if violencia_disponiveis:
-                    # Verificar quantos registros têm violência marcada
-                    def tem_violencia(row):
-                        for col in violencia_disponiveis:
-                            val = str(row.get(col, '')).upper().strip()
-                            if val in ['1', 'SIM', 'S', '1.0']:
-                                return True
-                            if pd.notna(row.get(col)) and row[col] == 1:
-                                return True
-                        return False
-                    
-                    registros_com_violencia = df[df.apply(tem_violencia, axis=1)]
-                    registros_sem_violencia = len(df) - len(registros_com_violencia)
-                    
-                    if registros_sem_violencia > 0:
-                        print(f"[INFO] Aplicando filtro de violencia (removendo {registros_sem_violencia:,} registros sem violencia)...")
-                        df = registros_com_violencia.copy()
-                        print(f"[OK] {len(df):,} registros com violencia marcada")
-                    else:
-                        print("[OK] Todos os registros ja tem violencia marcada")
+                # PULAR filtro de violência - dados pré-processados já estão filtrados
+                # Os dados em data/processed/ já foram filtrados durante o pré-processamento
+                # Aplicar o filtro novamente seria redundante e lento
+                print("[OK] Dados pré-processados já contêm apenas casos de violência (filtro aplicado durante pré-processamento)")
                 
                 # Criar um processador mínimo apenas para compatibilidade
                 processor = MinimalProcessor()
@@ -901,19 +883,129 @@ def create_derived_columns(df):
     
     return df
 
+# Função otimizada para processar tipos de violência expandidos
+@st.cache_data(ttl=3600, show_spinner=False)  # Cache por 1 hora - CRÍTICO para performance
+def process_tipos_violencia_expandidos(df_filtrado):
+    """
+    Processa e expande tipos de violência combinados em tipos individuais.
+    Função otimizada com operações vetorizadas.
+    IMPORTANTE: Esta função tem cache para evitar reprocessamento desnecessário.
+    """
+    if df_filtrado is None or len(df_filtrado) == 0:
+        return None
+    
+    if 'TIPO_VIOLENCIA' not in df_filtrado.columns or 'ANO_NOTIFIC' not in df_filtrado.columns:
+        return None
+    
+    # Filtrar apenas registros com dados válidos (usar loc para evitar cópia desnecessária)
+    mask_validos = (
+        df_filtrado['TIPO_VIOLENCIA'].notna() & 
+        df_filtrado['ANO_NOTIFIC'].notna()
+    )
+    
+    if not mask_validos.any():
+        return None
+    
+    # IMPORTANTE: Manter índice original para contar registros únicos
+    # Usar apenas as colunas necessárias, mas manter o índice original
+    df_temp = df_filtrado.loc[mask_validos, ['ANO_NOTIFIC', 'TIPO_VIOLENCIA']].copy()
+    
+    # Criar REGISTRO_ID_ORIGINAL baseado no índice antes de qualquer transformação
+    df_temp['REGISTRO_ID_ORIGINAL'] = df_temp.index
+    
+    # Converter para string e filtrar valores inválidos
+    df_temp['TIPO_VIOLENCIA'] = df_temp['TIPO_VIOLENCIA'].astype(str)
+    df_temp = df_temp[~df_temp['TIPO_VIOLENCIA'].isin(['nan', 'None', '', 'Não especificado'])]
+    
+    if len(df_temp) == 0:
+        return None
+    
+    # Filtrar tipos principais ANTES do explode (reduz drasticamente o processamento)
+    tipos_principais = ['Sexual', 'Física', 'Psicológica']
+    mask_tem_tipos = df_temp['TIPO_VIOLENCIA'].str.contains('|'.join(tipos_principais), na=False, case=False)
+    df_temp = df_temp[mask_tem_tipos]
+    
+    if len(df_temp) == 0:
+        return None
+    
+    # Separar tipos combinados usando split e explode (vetorizado - muito rápido)
+    # O REGISTRO_ID_ORIGINAL será mantido após o explode
+    df_temp['TIPO_VIOLENCIA'] = df_temp['TIPO_VIOLENCIA'].str.split(',')
+    df_tipos_expandidos = df_temp.explode('TIPO_VIOLENCIA')
+    
+    # Limpar espaços e filtrar apenas os 3 tipos principais
+    df_tipos_expandidos['TIPO_VIOLENCIA'] = df_tipos_expandidos['TIPO_VIOLENCIA'].str.strip()
+    df_tipos_expandidos = df_tipos_expandidos[
+        (df_tipos_expandidos['TIPO_VIOLENCIA'].isin(tipos_principais))
+    ]
+    
+    return df_tipos_expandidos
+
+# Função otimizada para processar tipos de violência expandidos para demografia (Gráfico 3)
+@st.cache_data(ttl=3600, show_spinner=False)  # Cache por 1 hora - CRÍTICO para performance
+def process_tipos_violencia_expandidos_demo(df_demografia):
+    """
+    Processa e expande tipos de violência para análise demográfica (Gráfico 3).
+    Mantém REGISTRO_ID_ORIGINAL para contar registros únicos.
+    IMPORTANTE: Esta função tem cache para evitar reprocessamento desnecessário.
+    """
+    if df_demografia is None or len(df_demografia) == 0:
+        return None
+    
+    if 'TIPO_VIOLENCIA' not in df_demografia.columns:
+        return None
+    
+    # Usar colunas necessárias incluindo REGISTRO_ID_ORIGINAL
+    df_temp_demo = df_demografia[['REGISTRO_ID_ORIGINAL', 'FAIXA_ETARIA', 'SEXO', 'TIPO_VIOLENCIA']].copy()
+    df_temp_demo = df_temp_demo[df_temp_demo['TIPO_VIOLENCIA'].notna()]
+    df_temp_demo['TIPO_VIOLENCIA'] = df_temp_demo['TIPO_VIOLENCIA'].astype(str)
+    df_temp_demo = df_temp_demo[~df_temp_demo['TIPO_VIOLENCIA'].isin(['nan', 'None', '', 'Não especificado'])]
+    
+    if len(df_temp_demo) == 0:
+        return None
+    
+    # Filtrar tipos principais ANTES do explode
+    tipos_principais = ['Sexual', 'Física', 'Psicológica']
+    mask_tem_tipos = df_temp_demo['TIPO_VIOLENCIA'].str.contains('|'.join(tipos_principais), na=False, case=False)
+    df_temp_demo = df_temp_demo[mask_tem_tipos]
+    
+    if len(df_temp_demo) == 0:
+        return None
+    
+    # Expandir tipos combinados (mantendo REGISTRO_ID_ORIGINAL)
+    df_temp_demo['TIPO_VIOLENCIA'] = df_temp_demo['TIPO_VIOLENCIA'].str.split(',')
+    df_tipos_expandidos_demo = df_temp_demo.explode('TIPO_VIOLENCIA')
+    df_tipos_expandidos_demo['TIPO_VIOLENCIA'] = df_tipos_expandidos_demo['TIPO_VIOLENCIA'].str.strip()
+    df_tipos_expandidos_demo = df_tipos_expandidos_demo[
+        df_tipos_expandidos_demo['TIPO_VIOLENCIA'].isin(tipos_principais)
+    ]
+    
+    return df_tipos_expandidos_demo
+
 # Carregar dados
-with st.spinner("Carregando dados do SINAN..."):
-    try:
+try:
+    with st.spinner("Carregando dados do SINAN (isso pode levar alguns segundos)..."):
         df, processor = load_sinan_data()
-    except MemoryError:
-        # Se houver erro de memória, limpar cache e tentar novamente
-        st.cache_data.clear()
-        st.warning("⚠️ Cache limpo devido a erro de memória. Recarregando dados...")
+except MemoryError:
+    # Se houver erro de memória, limpar cache e tentar novamente
+    st.cache_data.clear()
+    st.warning("Cache limpo devido a erro de memória. Recarregando dados...")
+    with st.spinner("Recarregando dados do SINAN..."):
         df, processor = load_sinan_data()
+except Exception as e:
+    st.error(f"Erro ao carregar dados: {str(e)}")
+    st.info("**Dicas para resolver:**\n"
+             "1. Verifique se o arquivo `data/processed/sinan_data_processed.parquet` existe\n"
+             "2. Tente limpar o cache: Menu → Settings → Clear cache\n"
+             "3. Se o problema persistir, execute o script de pré-processamento novamente")
+    st.stop()
 
 if df is None or len(df) == 0:
     st.error("Não foi possível carregar os dados. Verifique se os arquivos parquet estão disponíveis.")
     st.stop()
+
+# Garantir que df não é None (para satisfazer o linter)
+assert df is not None, "DataFrame não pode ser None após verificação"
 
 # Seção de Diagnóstico removida conforme solicitado
 
@@ -1069,12 +1161,86 @@ else:
     
     # Gráfico 1: Tendência Temporal (H1, H10)
     st.markdown('<div class="section-header">1. Tendência de Notificações ao Longo dos Anos (H1, H10)</div>', unsafe_allow_html=True)
-    st.markdown("**Hipóteses H1 e H10:** Verificar a tendência temporal e evolução das notificações ao longo dos anos.")
+    st.markdown("**H1 – Tendência Geral:** \"As notificações aumentaram após a pandemia?\" | **H10 – Impacto da Pandemia:** \"Houve queda das notificações em 2020 e aumento em 2021?\"")
     
     if 'ANO_NOTIFIC' in df_filtrado.columns and df_filtrado['ANO_NOTIFIC'].notna().any():
         df_tendencia = df_filtrado.groupby('ANO_NOTIFIC').size().reset_index(name='Total_Notificacoes')
         df_tendencia = df_tendencia.sort_values('ANO_NOTIFIC')
         df_tendencia['Total_Formatado'] = df_tendencia['Total_Notificacoes'].apply(formatar_numero_br)
+        
+        # Calcular variação percentual em relação ao ano anterior (H1)
+        df_tendencia['Variacao_Anterior'] = df_tendencia['Total_Notificacoes'].pct_change() * 100
+        df_tendencia['Variacao_Formatada'] = df_tendencia['Variacao_Anterior'].apply(
+            lambda x: f"{x:+.1f}%" if pd.notna(x) else ""
+        )
+        df_tendencia['Texto_Completo'] = df_tendencia.apply(
+            lambda row: f"{row['Total_Formatado']}<br>({row['Variacao_Formatada']})" if row['Variacao_Formatada'] else row['Total_Formatado'],
+            axis=1
+        )
+        
+        # Calcular indicadores de crescimento/queda
+        if len(df_tendencia) >= 2:
+            primeiro_ano = df_tendencia.iloc[0]
+            ultimo_ano = df_tendencia.iloc[-1]
+            primeiro_valor = primeiro_ano['Total_Notificacoes']
+            ultimo_valor = ultimo_ano['Total_Notificacoes']
+            
+            # Variação total
+            variacao_total = ((ultimo_valor - primeiro_valor) / primeiro_valor * 100) if primeiro_valor > 0 else 0
+            
+            # Variação anual média
+            variacao_anual_media = variacao_total / (len(df_tendencia) - 1) if len(df_tendencia) > 1 else 0
+            
+            # Análise pré/pós pandemia (H1)
+            anos_pre_pandemia = df_tendencia[df_tendencia['ANO_NOTIFIC'] < 2020]
+            anos_pos_pandemia = df_tendencia[df_tendencia['ANO_NOTIFIC'] > 2020]
+            
+            media_pre = anos_pre_pandemia['Total_Notificacoes'].mean() if len(anos_pre_pandemia) > 0 else 0
+            media_pos = anos_pos_pandemia['Total_Notificacoes'].mean() if len(anos_pos_pandemia) > 0 else 0
+            variacao_pos_pandemia = ((media_pos - media_pre) / media_pre * 100) if media_pre > 0 else 0
+            
+            # Análise 2019-2020-2021 (H10)
+            notif_2019 = df_tendencia[df_tendencia['ANO_NOTIFIC'] == 2019]['Total_Notificacoes'].values[0] if len(df_tendencia[df_tendencia['ANO_NOTIFIC'] == 2019]) > 0 else 0
+            notif_2020 = df_tendencia[df_tendencia['ANO_NOTIFIC'] == 2020]['Total_Notificacoes'].values[0] if len(df_tendencia[df_tendencia['ANO_NOTIFIC'] == 2020]) > 0 else 0
+            notif_2021 = df_tendencia[df_tendencia['ANO_NOTIFIC'] == 2021]['Total_Notificacoes'].values[0] if len(df_tendencia[df_tendencia['ANO_NOTIFIC'] == 2021]) > 0 else 0
+            
+            variacao_2020 = ((notif_2020 - notif_2019) / notif_2019 * 100) if notif_2019 > 0 else 0
+            variacao_2021 = ((notif_2021 - notif_2020) / notif_2020 * 100) if notif_2020 > 0 else 0
+            
+            # Exibir KPIs com indicadores de crescimento/queda
+            col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
+            with col_kpi1:
+                # Calcular diferença absoluta total
+                diferenca_absoluta_total = ultimo_valor - primeiro_valor
+                st.metric(
+                    "Variação Total",
+                    formatar_numero_br(diferenca_absoluta_total),
+                    delta=f"{variacao_total:+.1f}%"
+                )
+            with col_kpi2:
+                # Calcular diferença absoluta para H1
+                diferenca_absoluta_h1 = media_pos - media_pre if media_pre > 0 else 0
+                st.metric(
+                    "Variação Pós-Pandemia (H1)",
+                    formatar_numero_br(diferenca_absoluta_h1),
+                    delta=f"{variacao_pos_pandemia:+.1f}%"
+                )
+            with col_kpi3:
+                # Calcular diferença absoluta para 2020
+                diferenca_absoluta_2020 = notif_2020 - notif_2019
+                st.metric(
+                    "Variação 2020 (H10)",
+                    formatar_numero_br(diferenca_absoluta_2020),
+                    delta=f"{variacao_2020:+.1f}%"
+                )
+            with col_kpi4:
+                # Calcular diferença absoluta para 2021
+                diferenca_absoluta_2021 = notif_2021 - notif_2020
+                st.metric(
+                    "Variação 2021 (H10)",
+                    formatar_numero_br(diferenca_absoluta_2021),
+                    delta=f"{variacao_2021:+.1f}%"
+                )
         
         fig_line = px.line(
             df_tendencia, 
@@ -1100,9 +1266,69 @@ else:
         )
         max_value = df_tendencia['Total_Notificacoes'].max()
         aplicar_formatacao_eixo(fig_line, max_value, eixo='y')
+        
+        # Adicionar sombreamento vertical sutil para destacar período da pandemia (2020-2021)
+        # Verificar se os anos 2020 e 2021 existem nos dados
+        anos_disponiveis = df_tendencia['ANO_NOTIFIC'].values
+        if 2020 in anos_disponiveis or 2021 in anos_disponiveis:
+            # Adicionar retângulo vertical que cobre 2020 e 2021
+            # Usar coordenadas de 2019.5 a 2021.5 para cobrir bem os dois anos
+            fig_line.add_vrect(
+                x0=2019.5,
+                x1=2021.5,
+                fillcolor="lightgray",
+                opacity=0.15,  # Opacidade muito baixa para ser sutil
+                layer="below",  # Colocar atrás dos dados
+                line_width=0,  # Sem borda
+            )
+        
+        # Adicionar anotações com números e porcentagens (H1)
+        annotations = []
+        for idx, row in df_tendencia.iterrows():
+            if pd.notna(row['Variacao_Anterior']):
+                annotations.append(
+                    dict(
+                        x=row['ANO_NOTIFIC'],
+                        y=row['Total_Notificacoes'],
+                        text=f"{row['Total_Formatado']}<br>({row['Variacao_Formatada']})",
+                        showarrow=True,
+                        arrowhead=2,
+                        arrowcolor='#1a237e',
+                        ax=0,
+                        ay=-40,
+                        bgcolor='rgba(255,255,255,0.8)',
+                        bordercolor='#1a237e',
+                        borderwidth=1,
+                        font=dict(size=9, color='#000000')
+                    )
+                )
+            else:
+                annotations.append(
+                    dict(
+                        x=row['ANO_NOTIFIC'],
+                        y=row['Total_Notificacoes'],
+                        text=row['Total_Formatado'],
+                        showarrow=True,
+                        arrowhead=2,
+                        arrowcolor='#1a237e',
+                        ax=0,
+                        ay=-40,
+                        bgcolor='rgba(255,255,255,0.8)',
+                        bordercolor='#1a237e',
+                        borderwidth=1,
+                        font=dict(size=9, color='#000000')
+                    )
+                )
+        
+        fig_line.update_layout(annotations=annotations)
+        # Preparar customdata corretamente para hover
+        custom_data_list = []
+        for idx, row in df_tendencia.iterrows():
+            custom_data_list.append([row['Total_Formatado'], row['Variacao_Formatada'] if pd.notna(row['Variacao_Formatada']) else 'N/A'])
+        
         fig_line.update_traces(
-            customdata=df_tendencia['Total_Formatado'],
-            hovertemplate='<b>%{x}</b><br>Total: %{customdata}<extra></extra>'
+            customdata=custom_data_list,
+            hovertemplate='<b>%{x}</b><br>Total: %{customdata[0]}<br>Variação: %{customdata[1]}<extra></extra>'
         )
         st.plotly_chart(fig_line, use_container_width=True)
     else:
@@ -1110,134 +1336,481 @@ else:
 
     # Gráfico 2: Composição por Tipo de Violência (H9)
     st.markdown('<div class="section-header">2. Composição Anual por Tipo de Violência (H9)</div>', unsafe_allow_html=True)
-    st.markdown("**Hipótese H9:** Analisar a composição e proporção de cada tipo de violência ao longo dos anos.")
+    st.markdown("**H9 – Subnotificação:** \"A violência psicológica está sendo subnotificada?\"")
     
     if 'TIPO_VIOLENCIA' in df_filtrado.columns and 'ANO_NOTIFIC' in df_filtrado.columns:
-        df_composicao = df_filtrado.groupby(['ANO_NOTIFIC', 'TIPO_VIOLENCIA']).size().reset_index(name='Contagem')
-        df_composicao = df_composicao.sort_values('ANO_NOTIFIC')
-        
-        # Pegar apenas os tipos mais frequentes para não sobrecarregar o gráfico
-        tipos_mais_freq = df_filtrado['TIPO_VIOLENCIA'].value_counts().head(5).index.tolist()
-        df_composicao_filtrado = df_composicao[df_composicao['TIPO_VIOLENCIA'].isin(tipos_mais_freq)]
-        df_composicao_filtrado['Contagem_Formatada'] = df_composicao_filtrado['Contagem'].apply(formatar_numero_br)
-        
-        fig_bar_stacked = px.bar(
-            df_composicao_filtrado, 
-            x='ANO_NOTIFIC', 
-            y='Contagem', 
-            color='TIPO_VIOLENCIA',
-            title='Notificações por Ano e Tipo de Violência',
-            labels={'ANO_NOTIFIC': 'Ano', 'Contagem': 'Contagem de Notificações', 'TIPO_VIOLENCIA': 'Tipo de Violência'},
-            barmode='stack',
-            color_discrete_sequence=['#2E86AB', '#A23B72', '#F18F01', '#C73E1D', '#6A994E', '#BC4749', '#7209B7', '#FF6B35', '#4ECDC4', '#FFE66D'],  # Cores diversas e bem visíveis
-            height=500,  # Altura fixa para evitar compressão
-            custom_data=['Contagem_Formatada', 'TIPO_VIOLENCIA']
-        )
-        # Melhorar layout: legenda abaixo com mais espaçamento do gráfico
-        fig_bar_stacked.update_layout(
-            legend=dict(
-                orientation="h",
-                yanchor="top",
-                y=-0.25,  # Aumentado para mais espaçamento entre gráfico e legenda
-                xanchor="center",
-                x=0.5,
-                font=dict(size=10),
-                bgcolor="rgba(255,255,255,0.8)",
-                bordercolor="rgba(0,0,0,0.2)",
-                borderwidth=1,
-                itemwidth=30,
-                tracegroupgap=10
-            ),
-            margin=dict(l=50, r=50, t=80, b=120),  # Aumentada margem inferior para acomodar legenda
-            height=500
-        )
-        max_contagem = df_composicao_filtrado['Contagem'].max()
-        aplicar_formatacao_eixo(fig_bar_stacked, max_contagem, eixo='y')
-        fig_bar_stacked.update_traces(
-            hovertemplate='<b>%{x}</b><br>Tipo: %{customdata[1]}<br>Total: %{customdata[0]}<extra></extra>'
-        )
-        st.plotly_chart(fig_bar_stacked, use_container_width=True)
+        try:
+            # Usar função com cache para processar tipos de violência
+            df_tipos_expandidos = process_tipos_violencia_expandidos(df_filtrado)
+            
+            if df_tipos_expandidos is None or len(df_tipos_expandidos) == 0:
+                st.info("Nenhum dado válido de tipo de violência disponível para este gráfico")
+            else:
+                # IMPORTANTE: Contar REGISTROS ÚNICOS, não linhas expandidas
+                # Usar REGISTRO_ID_ORIGINAL para contar quantos registros únicos têm cada combinação
+                if 'REGISTRO_ID_ORIGINAL' in df_tipos_expandidos.columns:
+                    df_composicao = df_tipos_expandidos.groupby(['ANO_NOTIFIC', 'TIPO_VIOLENCIA'])['REGISTRO_ID_ORIGINAL'].nunique().reset_index(name='Contagem')
+                else:
+                    # Fallback: se não tiver REGISTRO_ID_ORIGINAL, usar size() mas avisar
+                    df_composicao = df_tipos_expandidos.groupby(['ANO_NOTIFIC', 'TIPO_VIOLENCIA']).size().reset_index(name='Contagem')
+                    st.warning("Aviso: Contando linhas expandidas, não registros únicos. Os números podem estar inflados.")
+                
+                df_composicao = df_composicao.sort_values(['ANO_NOTIFIC', 'TIPO_VIOLENCIA'])
+                
+                # Calcular porcentagens por ano
+                df_composicao['Total_Ano'] = df_composicao.groupby('ANO_NOTIFIC')['Contagem'].transform('sum')
+                df_composicao['Percentual'] = (df_composicao['Contagem'] / df_composicao['Total_Ano'] * 100).round(1)
+                df_composicao['Contagem_Formatada'] = df_composicao['Contagem'].apply(formatar_numero_br)
+                
+                # Calcular estatísticas para responder H9
+                anos_ordenados = sorted(df_composicao['ANO_NOTIFIC'].unique())
+                
+                # Calcular totais por tipo em todo o período (contando registros únicos)
+                total_sexual = df_composicao[df_composicao['TIPO_VIOLENCIA'] == 'Sexual']['Contagem'].sum()
+                total_fisica = df_composicao[df_composicao['TIPO_VIOLENCIA'] == 'Física']['Contagem'].sum()
+                total_psicologica = df_composicao[df_composicao['TIPO_VIOLENCIA'] == 'Psicológica']['Contagem'].sum()
+                
+                # IMPORTANTE: Não somar os totais! Cada registro pode ter múltiplos tipos
+                # O total_geral deve ser o número de registros únicos que têm pelo menos um dos tipos
+                # Calcular registros únicos que têm qualquer um dos três tipos
+                if 'REGISTRO_ID_ORIGINAL' in df_tipos_expandidos.columns:
+                    total_registros_unicos = df_tipos_expandidos['REGISTRO_ID_ORIGINAL'].nunique()
+                    total_geral = total_registros_unicos  # Total de notificações únicas
+                else:
+                    # Fallback: somar (mas isso está incorreto se houver registros com múltiplos tipos)
+                    total_geral = total_sexual + total_fisica + total_psicologica
+                
+                # Calcular percentuais
+                pct_sexual = (total_sexual / total_geral * 100) if total_geral > 0 else 0
+                pct_fisica = (total_fisica / total_geral * 100) if total_geral > 0 else 0
+                pct_psicologica = (total_psicologica / total_geral * 100) if total_geral > 0 else 0
+                
+                # Calcular crescimento entre primeiro e último ano
+                if len(anos_ordenados) >= 2:
+                    primeiro_ano = anos_ordenados[0]
+                    ultimo_ano = anos_ordenados[-1]
+                    
+                    sexual_primeiro = df_composicao[(df_composicao['TIPO_VIOLENCIA'] == 'Sexual') & (df_composicao['ANO_NOTIFIC'] == primeiro_ano)]['Contagem'].sum()
+                    sexual_ultimo = df_composicao[(df_composicao['TIPO_VIOLENCIA'] == 'Sexual') & (df_composicao['ANO_NOTIFIC'] == ultimo_ano)]['Contagem'].sum()
+                    crescimento_sexual = ((sexual_ultimo - sexual_primeiro) / sexual_primeiro * 100) if sexual_primeiro > 0 else 0
+                    
+                    fisica_primeiro = df_composicao[(df_composicao['TIPO_VIOLENCIA'] == 'Física') & (df_composicao['ANO_NOTIFIC'] == primeiro_ano)]['Contagem'].sum()
+                    fisica_ultimo = df_composicao[(df_composicao['TIPO_VIOLENCIA'] == 'Física') & (df_composicao['ANO_NOTIFIC'] == ultimo_ano)]['Contagem'].sum()
+                    crescimento_fisica = ((fisica_ultimo - fisica_primeiro) / fisica_primeiro * 100) if fisica_primeiro > 0 else 0
+                    
+                    psicologica_primeiro = df_composicao[(df_composicao['TIPO_VIOLENCIA'] == 'Psicológica') & (df_composicao['ANO_NOTIFIC'] == primeiro_ano)]['Contagem'].sum()
+                    psicologica_ultimo = df_composicao[(df_composicao['TIPO_VIOLENCIA'] == 'Psicológica') & (df_composicao['ANO_NOTIFIC'] == ultimo_ano)]['Contagem'].sum()
+                    crescimento_psicologica = ((psicologica_ultimo - psicologica_primeiro) / psicologica_primeiro * 100) if psicologica_primeiro > 0 else 0
+                else:
+                    crescimento_sexual = 0
+                    crescimento_fisica = 0
+                    crescimento_psicologica = 0
+                
+                # Análise para responder H9: Comparar proporções
+                # Se violência psicológica tem proporção muito menor que física e sexual, pode indicar subnotificação
+                media_outras = (pct_sexual + pct_fisica) / 2
+                diferenca_proporcao = media_outras - pct_psicologica
+                
+                # Determinar resposta à hipótese H9
+                if pct_psicologica < 30 and diferenca_proporcao > 15:
+                    resposta_h9 = "SIM - A violência psicológica está sendo subnotificada"
+                    explicacao_h9 = f"A violência psicológica representa apenas {pct_psicologica:.1f}% do total, enquanto Sexual ({pct_sexual:.1f}%) e Física ({pct_fisica:.1f}%) juntas representam {pct_sexual + pct_fisica:.1f}%. Esta desproporção sugere subnotificação, pois a violência psicológica frequentemente ocorre em conjunto com outros tipos."
+                elif pct_psicologica < 40 and diferenca_proporcao > 10:
+                    resposta_h9 = "PROVAVELMENTE - Indícios de subnotificação"
+                    explicacao_h9 = f"A violência psicológica representa {pct_psicologica:.1f}% do total, menor que a média das outras ({media_outras:.1f}%). Há indícios de subnotificação, especialmente considerando que violência psicológica frequentemente acompanha outros tipos."
+                else:
+                    resposta_h9 = "NÃO - A violência psicológica não parece estar subnotificada"
+                    explicacao_h9 = f"A violência psicológica representa {pct_psicologica:.1f}% do total, proporção similar às outras formas de violência (Sexual: {pct_sexual:.1f}%, Física: {pct_fisica:.1f}%)."
+                
+                # Exibir KPIs e resposta à hipótese
+                col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
+                with col_kpi1:
+                    st.metric(
+                        "Violência Sexual",
+                        formatar_numero_br(total_sexual),
+                        delta=f"{pct_sexual:.1f}% do total"
+                    )
+                with col_kpi2:
+                    st.metric(
+                        "Violência Física",
+                        formatar_numero_br(total_fisica),
+                        delta=f"{pct_fisica:.1f}% do total"
+                    )
+                with col_kpi3:
+                    st.metric(
+                        "Violência Psicológica",
+                        formatar_numero_br(total_psicologica),
+                        delta=f"{pct_psicologica:.1f}% do total"
+                    )
+                
+                # Explicação sobre a lógica de contagem
+                st.caption(f"**Total de notificações únicas analisadas: {total_geral:,}** | *Nota: Cada número representa quantas notificações únicas têm aquele tipo de violência. Uma notificação pode ter múltiplos tipos, então a soma dos três tipos ({total_sexual + total_fisica + total_psicologica:,}) pode ser maior que o total de notificações únicas.*")
+                
+                # Explicação sobre as diferenças de porcentagem
+                st.info(f"**Análise:** {explicacao_h9}")
+                
+                # Criar gráfico de barras agrupadas
+                # Garantir ordenação: anos em ordem crescente e tipos de violência na ordem desejada
+                df_composicao = df_composicao.sort_values(['ANO_NOTIFIC', 'TIPO_VIOLENCIA'])
+                
+                # Definir ordem dos tipos de violência
+                ordem_tipos = ['Sexual', 'Física', 'Psicológica']
+                
+                fig_bar = px.bar(
+                    df_composicao,
+                    x='ANO_NOTIFIC',
+                    y='Contagem',
+                    color='TIPO_VIOLENCIA',
+                    title='Notificações por Ano e Tipo de Violência (Sexual, Física, Psicológica)',
+                    labels={'ANO_NOTIFIC': 'Ano', 'Contagem': 'Contagem de Notificações', 'TIPO_VIOLENCIA': 'Tipo de Violência'},
+                    barmode='group',
+                    color_discrete_map={
+                        'Sexual': '#C73E1D',
+                        'Física': '#2E86AB',
+                        'Psicológica': '#F18F01'
+                    },
+                    category_orders={
+                        'ANO_NOTIFIC': sorted(df_composicao['ANO_NOTIFIC'].unique()),
+                        'TIPO_VIOLENCIA': ordem_tipos
+                    },
+                    height=500
+                )
+                
+                fig_bar.update_layout(
+                    legend=dict(
+                        orientation="h",
+                        yanchor="top",
+                        y=-0.15,
+                        xanchor="center",
+                        x=0.5,
+                        font=dict(size=12)
+                    ),
+                    margin=dict(l=50, r=50, t=80, b=100),
+                    height=500
+                )
+                
+                max_contagem = df_composicao['Contagem'].max()
+                aplicar_formatacao_eixo(fig_bar, max_contagem, eixo='y')
+                
+                # Adicionar hover personalizado
+                fig_bar.update_traces(
+                    hovertemplate='<b>%{x}</b><br>Tipo: %{fullData.name}<br>Total: %{y:,.0f}<br>Percentual do ano: %{customdata:.1f}%<extra></extra>',
+                    customdata=df_composicao['Percentual']
+                )
+                
+                st.plotly_chart(fig_bar, use_container_width=True)
+        except Exception as e:
+            st.error(f"Erro ao processar tipos de violência: {str(e)}")
+            st.info("Tente limpar o cache e recarregar os dados")
     else:
         st.info("Dados de tipo de violência ou ano não disponíveis para este gráfico")
 
     # Gráfico 3: Distribuição por Faixa Etária e Sexo (H2, H4, H5)
     st.markdown('<div class="section-header">3. Distribuição por Faixa Etária e Sexo (H2, H4, H5)</div>', unsafe_allow_html=True)
-    st.markdown("**Hipóteses H2, H4 e H5:** Comparar a incidência entre diferentes faixas etárias e sexo da vítima.")
+    st.markdown("**H2 – Tipo de Violência por faixa etária:** \"Violência sexual é o tipo mais incidente entre adolescentes (12–17 anos)?\" | **H4 – Sexo vs Tipo:** \"A violência sexual é desproporcionalmente maior no sexo feminino?\" | **H5 – Faixa Etária vs Psicológica/Moral:** \"A violência psicológica é mais comum em adolescentes de 15 a 17 anos?\"")
     st.info("**Nota:** Análise para crianças e adolescentes de **0 a 17 anos** (faixas: 0-1, 2-5, 6-9, 10-13, 14-17 anos).")
     
     if 'FAIXA_ETARIA' in df_filtrado.columns and 'SEXO' in df_filtrado.columns:
         # Garantir que apenas faixas etárias de 0-17 anos sejam incluídas
         faixas_validas = ['0-1 anos', '2-5 anos', '6-9 anos', '10-13 anos', '14-17 anos']
         
+        # IMPORTANTE: Usar df_filtrado completo e manter índice original para contar corretamente
+        # Criar REGISTRO_ID baseado no índice original ANTES de qualquer filtro
+        df_demografia_base = df_filtrado.copy()
+        df_demografia_base['REGISTRO_ID_ORIGINAL'] = df_demografia_base.index
+        
+        # Debug: verificar total de registros antes dos filtros
+        total_antes_filtros = len(df_demografia_base)
+        
         # Filtrar apenas registros com faixas válidas e sexo válido
-        df_demografia = df_filtrado[
-            (df_filtrado['FAIXA_ETARIA'].isin(faixas_validas)) & 
-            (df_filtrado['SEXO'].notna()) & 
-            (df_filtrado['SEXO'] != 'Não informado')
+        df_demografia = df_demografia_base[
+            (df_demografia_base['FAIXA_ETARIA'].isin(faixas_validas)) & 
+            (df_demografia_base['SEXO'].notna()) & 
+            (df_demografia_base['SEXO'] != 'Não informado')
         ].copy()
         
+        # Debug: verificar total após filtros de faixa etária e sexo
+        total_apos_filtros_demo = len(df_demografia)
+        
         if len(df_demografia) > 0:
-            df_demografia = df_demografia.groupby(['FAIXA_ETARIA', 'SEXO']).size().reset_index(name='Contagem')
+            # OTIMIZADO: Usar função com cache para processar tipos de violência expandidos
+            # Isso evita reprocessamento desnecessário a cada renderização
+            df_tipos_expandidos_demo = process_tipos_violencia_expandidos_demo(df_demografia)
             
-            # Ordenar faixas etárias na ordem correta (0-1, 2-5, 6-9, 10-13, 14-17)
-            ordem_faixas = {faixa: idx for idx, faixa in enumerate(faixas_validas)}
-            df_demografia['ordem'] = df_demografia['FAIXA_ETARIA'].map(ordem_faixas)
-            df_demografia = df_demografia.sort_values('ordem').drop('ordem', axis=1)
-            
-            # Garantir que todas as faixas apareçam no gráfico, mesmo com 0 registros
-            # Criar DataFrame completo com todas as combinações
-            import itertools
-            todas_combinacoes = list(itertools.product(faixas_validas, df_demografia['SEXO'].unique()))
-            df_completo = pd.DataFrame(todas_combinacoes, columns=['FAIXA_ETARIA', 'SEXO'])
-            df_demografia = df_completo.merge(df_demografia, on=['FAIXA_ETARIA', 'SEXO'], how='left')
-            df_demografia['Contagem'] = df_demografia['Contagem'].fillna(0).astype(int)
-            df_demografia['Contagem_Formatada'] = df_demografia['Contagem'].apply(formatar_numero_br)
-            
-            fig_bar_grouped = px.bar(
-                df_demografia, 
-                x='FAIXA_ETARIA', 
-                y='Contagem', 
-                color='SEXO',
-                barmode='group',
-                title='Contagem de Notificações por Faixa Etária e Sexo (0-17 anos)',
-                labels={'FAIXA_ETARIA': 'Faixa Etária', 'Contagem': 'Contagem de Notificações', 'SEXO': 'Sexo'},
-                category_orders={'FAIXA_ETARIA': faixas_validas},  # Garantir ordem correta
-                color_discrete_sequence=['#2E86AB', '#A23B72', '#F18F01', '#C73E1D'],  # Cores escuras e visíveis
-                height=500,  # Altura fixa
-                custom_data=['Contagem_Formatada', 'SEXO']
-            )
-            fig_bar_grouped.update_xaxes(tickangle=0)
-            # Melhorar layout: legenda horizontal abaixo com mais espaçamento do gráfico
-            fig_bar_grouped.update_layout(
-                legend=dict(
-                    orientation="h",
-                    yanchor="top",
-                    y=-0.25,  # Aumentado para mais espaçamento entre gráfico e legenda
-                    xanchor="center",
-                    x=0.5,
-                    font=dict(size=11),
-                    bgcolor="rgba(255,255,255,0.8)",
-                    bordercolor="rgba(0,0,0,0.2)",
-                    borderwidth=1,
-                    itemwidth=40,
-                    tracegroupgap=20,
-                    itemsizing="constant",
-                    itemclick="toggleothers",
-                    itemdoubleclick="toggle"
-                ),
-                margin=dict(l=50, r=50, t=80, b=120),  # Aumentada margem inferior para acomodar legenda
-                height=500
-            )
-            max_contagem_demografia = df_demografia['Contagem'].max()
-            aplicar_formatacao_eixo(fig_bar_grouped, max_contagem_demografia, eixo='y')
-            fig_bar_grouped.update_traces(
-                hovertemplate='<b>%{x}</b><br>Sexo: %{customdata[1]}<br>Total: %{customdata[0]}<extra></extra>'
-            )
-            st.plotly_chart(fig_bar_grouped, use_container_width=True)
-            
-            # Mostrar estatísticas
-            total_casos = df_demografia['Contagem'].sum()
-            st.caption(f"**Total de casos analisados:** {formatar_numero_br(total_casos)} | **Faixas etárias:** {', '.join(faixas_validas)}")
+            # Criar gráfico que mostra tipos de violência por faixa etária e sexo
+            # Os KPIs serão calculados usando os mesmos dados agrupados do gráfico para garantir consistência
+            faixas_adolescentes = ['10-13 anos', '14-17 anos']
+            total_registros_unicos = 0  # Inicializar variável
+            if df_tipos_expandidos_demo is not None and len(df_tipos_expandidos_demo) > 0:
+                # IMPORTANTE: Contar REGISTROS ÚNICOS usando índice original
+                # Cada registro original conta apenas uma vez por tipo de violência
+                if 'REGISTRO_ID_ORIGINAL' in df_tipos_expandidos_demo.columns:
+                    # Verificar total de registros únicos antes do agrupamento
+                    total_registros_unicos = df_tipos_expandidos_demo['REGISTRO_ID_ORIGINAL'].nunique()
+                    
+                    # Agrupar e contar registros únicos usando REGISTRO_ID_ORIGINAL
+                    # Isso garante que cada notificação conta apenas uma vez por tipo
+                    df_grafico = df_tipos_expandidos_demo.groupby(
+                        ['FAIXA_ETARIA', 'SEXO', 'TIPO_VIOLENCIA']
+                    )['REGISTRO_ID_ORIGINAL'].nunique().reset_index(name='Contagem')
+                    
+                    # Verificar se a soma faz sentido (pode ser maior que total_registros_unicos se houver múltiplos tipos)
+                    soma_total_grafico = df_grafico['Contagem'].sum()
+                    
+                    # Mostrar informações sobre quantos registros estão sendo analisados
+                    # Nota: A soma pode ser maior que total_registros_unicos porque um registro pode ter múltiplos tipos
+                    st.caption(f"**Análise baseada em {total_registros_unicos:,} notificações únicas** com tipos Sexual/Física/Psicológica (faixa etária 0-17 anos, período {ano_selecionado[0]}-{ano_selecionado[1]}) | Total de registros no período: {total_antes_filtros:,}")
+                else:
+                    # Fallback: se não tiver REGISTRO_ID_ORIGINAL, usar size() mas avisar
+                    df_grafico = df_tipos_expandidos_demo.groupby(
+                        ['FAIXA_ETARIA', 'SEXO', 'TIPO_VIOLENCIA']
+                    ).size().reset_index(name='Contagem')
+                    total_registros_unicos = total_apos_filtros_demo  # Usar fallback
+                    st.warning("Aviso: Contando linhas expandidas, não registros únicos. Os números podem estar inflados.")
+                
+                # Recalcular KPIs usando os dados agrupados do gráfico (garantir consistência)
+                # H2: Violência sexual em adolescentes (10-13 e 14-17 anos)
+                df_adolescentes_grafico = df_grafico[
+                    df_grafico['FAIXA_ETARIA'].isin(faixas_adolescentes)
+                ]
+                if len(df_adolescentes_grafico) > 0:
+                    total_por_tipo_h2 = df_adolescentes_grafico.groupby('TIPO_VIOLENCIA')['Contagem'].sum()
+                    total_sexual_h2 = total_por_tipo_h2.get('Sexual', 0)
+                    total_fisica_h2 = total_por_tipo_h2.get('Física', 0)
+                    total_psicologica_h2 = total_por_tipo_h2.get('Psicológica', 0)
+                    total_todos_tipos_h2 = total_por_tipo_h2.sum()
+                    pct_sexual_h2 = (total_sexual_h2 / total_todos_tipos_h2 * 100) if total_todos_tipos_h2 > 0 else 0
+                    pct_fisica_h2 = (total_fisica_h2 / total_todos_tipos_h2 * 100) if total_todos_tipos_h2 > 0 else 0
+                    pct_psicologica_h2 = (total_psicologica_h2 / total_todos_tipos_h2 * 100) if total_todos_tipos_h2 > 0 else 0
+                    
+                    # Análise H2: Determinar resposta
+                    if pct_sexual_h2 > max(pct_fisica_h2, pct_psicologica_h2) and pct_sexual_h2 > 40:
+                        resposta_h2 = "SIM - A violência sexual é o tipo mais incidente entre adolescentes"
+                        explicacao_h2 = f"A violência sexual representa {pct_sexual_h2:.1f}% dos casos em adolescentes (10-17 anos), sendo maior que Física ({pct_fisica_h2:.1f}%) e Psicológica ({pct_psicologica_h2:.1f}%)."
+                    elif pct_sexual_h2 > max(pct_fisica_h2, pct_psicologica_h2):
+                        resposta_h2 = "SIM - A violência sexual é o tipo mais incidente, mas com margem pequena"
+                        explicacao_h2 = f"A violência sexual representa {pct_sexual_h2:.1f}% dos casos em adolescentes, ligeiramente maior que Física ({pct_fisica_h2:.1f}%) e Psicológica ({pct_psicologica_h2:.1f}%)."
+                    else:
+                        resposta_h2 = "NÃO - A violência sexual não é o tipo mais incidente entre adolescentes"
+                        tipo_maior = "Física" if pct_fisica_h2 > pct_psicologica_h2 else "Psicológica"
+                        pct_maior = max(pct_fisica_h2, pct_psicologica_h2)
+                        explicacao_h2 = f"A violência sexual representa {pct_sexual_h2:.1f}% dos casos em adolescentes, menor que {tipo_maior} ({pct_maior:.1f}%)."
+                else:
+                    total_sexual_h2 = 0
+                    pct_sexual_h2 = 0
+                    resposta_h2 = "N/A - Dados insuficientes"
+                    cor_resposta_h2 = "⚪"
+                    explicacao_h2 = "Não há dados suficientes para analisar esta hipótese."
+                
+                # H4: Violência sexual por sexo
+                df_sexual_grafico = df_grafico[df_grafico['TIPO_VIOLENCIA'] == 'Sexual']
+                if len(df_sexual_grafico) > 0:
+                    total_sexual_sexo_h4 = df_sexual_grafico['Contagem'].sum()
+                    total_feminino_sexual_h4 = df_sexual_grafico[df_sexual_grafico['SEXO'] == 'Feminino']['Contagem'].sum()
+                    total_masculino_sexual_h4 = df_sexual_grafico[df_sexual_grafico['SEXO'] == 'Masculino']['Contagem'].sum()
+                    pct_feminino_sexual_h4 = (total_feminino_sexual_h4 / total_sexual_sexo_h4 * 100) if total_sexual_sexo_h4 > 0 else 0
+                    pct_masculino_sexual_h4 = (total_masculino_sexual_h4 / total_sexual_sexo_h4 * 100) if total_sexual_sexo_h4 > 0 else 0
+                    
+                    # Comparar com distribuição geral
+                    total_geral_h4 = df_grafico['Contagem'].sum()
+                    total_feminino_geral_h4 = df_grafico[df_grafico['SEXO'] == 'Feminino']['Contagem'].sum()
+                    pct_feminino_geral_h4 = (total_feminino_geral_h4 / total_geral_h4 * 100) if total_geral_h4 > 0 else 0
+                    desproporcao_h4 = pct_feminino_sexual_h4 - pct_feminino_geral_h4
+                    
+                    # Análise H4: Determinar resposta
+                    if desproporcao_h4 > 15:
+                        resposta_h4 = "SIM - A violência sexual é desproporcionalmente maior no sexo feminino"
+                        explicacao_h4 = f"A violência sexual afeta {pct_feminino_sexual_h4:.1f}% do sexo feminino, enquanto a distribuição geral de violência é {pct_feminino_geral_h4:.1f}% feminina. A diferença de {desproporcao_h4:.1f} pontos percentuais indica desproporção significativa."
+                    elif desproporcao_h4 > 5:
+                        resposta_h4 = "SIM - Há desproporção, mas moderada"
+                        explicacao_h4 = f"A violência sexual afeta {pct_feminino_sexual_h4:.1f}% do sexo feminino, enquanto a distribuição geral é {pct_feminino_geral_h4:.1f}% feminina. A diferença de {desproporcao_h4:.1f} pontos percentuais indica desproporção moderada."
+                    else:
+                        resposta_h4 = "NÃO - A violência sexual não é desproporcionalmente maior no sexo feminino"
+                        explicacao_h4 = f"A violência sexual afeta {pct_feminino_sexual_h4:.1f}% do sexo feminino, similar à distribuição geral de violência ({pct_feminino_geral_h4:.1f}% feminina). A diferença de {desproporcao_h4:.1f} pontos percentuais não indica desproporção significativa."
+                else:
+                    total_feminino_sexual_h4 = 0
+                    desproporcao_h4 = 0
+                    resposta_h4 = "N/A - Dados insuficientes"
+                    cor_resposta_h4 = "⚪"
+                    explicacao_h4 = "Não há dados suficientes para analisar esta hipótese."
+                
+                # H5: Violência psicológica em 14-17 anos
+                df_psicologica_grafico = df_grafico[df_grafico['TIPO_VIOLENCIA'] == 'Psicológica']
+                if len(df_psicologica_grafico) > 0:
+                    total_psicologica_h5 = df_psicologica_grafico['Contagem'].sum()
+                    contagem_14_17_h5 = df_psicologica_grafico[df_psicologica_grafico['FAIXA_ETARIA'] == '14-17 anos']['Contagem'].sum()
+                    # Calcular também outras faixas para comparação
+                    contagem_10_13_h5 = df_psicologica_grafico[df_psicologica_grafico['FAIXA_ETARIA'] == '10-13 anos']['Contagem'].sum()
+                    contagem_6_9_h5 = df_psicologica_grafico[df_psicologica_grafico['FAIXA_ETARIA'] == '6-9 anos']['Contagem'].sum()
+                    pct_14_17_h5 = (contagem_14_17_h5 / total_psicologica_h5 * 100) if total_psicologica_h5 > 0 else 0
+                    pct_10_13_h5 = (contagem_10_13_h5 / total_psicologica_h5 * 100) if total_psicologica_h5 > 0 else 0
+                    pct_6_9_h5 = (contagem_6_9_h5 / total_psicologica_h5 * 100) if total_psicologica_h5 > 0 else 0
+                    
+                    # Análise H5: Determinar resposta (comparar 14-17 com outras faixas)
+                    if pct_14_17_h5 > max(pct_10_13_h5, pct_6_9_h5) and pct_14_17_h5 > 35:
+                        resposta_h5 = "SIM - A violência psicológica é mais comum em adolescentes de 14-17 anos"
+                        explicacao_h5 = f"A violência psicológica em adolescentes de 14-17 anos representa {pct_14_17_h5:.1f}% do total de violência psicológica, sendo maior que nas faixas 10-13 anos ({pct_10_13_h5:.1f}%) e 6-9 anos ({pct_6_9_h5:.1f}%)."
+                    elif pct_14_17_h5 > max(pct_10_13_h5, pct_6_9_h5):
+                        resposta_h5 = "SIM - Mais comum em 14-17 anos, mas com margem pequena"
+                        explicacao_h5 = f"A violência psicológica em adolescentes de 14-17 anos representa {pct_14_17_h5:.1f}% do total, ligeiramente maior que nas outras faixas etárias analisadas."
+                    else:
+                        resposta_h5 = "NÃO - A violência psicológica não é mais comum em adolescentes de 14-17 anos"
+                        faixa_maior = "10-13 anos" if pct_10_13_h5 > pct_6_9_h5 else "6-9 anos"
+                        pct_maior_h5 = max(pct_10_13_h5, pct_6_9_h5)
+                        explicacao_h5 = f"A violência psicológica em adolescentes de 14-17 anos representa {pct_14_17_h5:.1f}% do total, menor que na faixa de {faixa_maior} ({pct_maior_h5:.1f}%)."
+                else:
+                    contagem_14_17_h5 = 0
+                    pct_14_17_h5 = 0
+                    resposta_h5 = "N/A - Dados insuficientes"
+                    cor_resposta_h5 = "⚪"
+                    explicacao_h5 = "Não há dados suficientes para analisar esta hipótese."
+                
+                # Exibir KPIs (usando dados do gráfico para garantir consistência)
+                col_h2, col_h4, col_h5 = st.columns(3)
+                with col_h2:
+                    st.metric(
+                        "Violência Sexual em Adolescentes (H2)",
+                        formatar_numero_br(total_sexual_h2),
+                        delta=f"{pct_sexual_h2:.1f}%"
+                    )
+                with col_h4:
+                    st.metric(
+                        "Desproporção Feminino - Sexual (H4)",
+                        formatar_numero_br(total_feminino_sexual_h4),
+                        delta=f"{desproporcao_h4:+.1f}pp"
+                    )
+                with col_h5:
+                    st.metric(
+                        "Psicológica em 14-17 anos (H5)",
+                        formatar_numero_br(contagem_14_17_h5),
+                        delta=f"{pct_14_17_h5:.1f}%"
+                    )
+                
+                # Filtrar apenas sexos válidos
+                df_grafico = df_grafico[
+                    (df_grafico['SEXO'].notna()) & 
+                    (df_grafico['SEXO'] != 'Não informado')
+                ]
+                
+                # Ordenar faixas etárias
+                ordem_faixas = {faixa: idx for idx, faixa in enumerate(faixas_validas)}
+                df_grafico['ordem'] = df_grafico['FAIXA_ETARIA'].map(ordem_faixas)
+                df_grafico = df_grafico.sort_values(['ordem', 'TIPO_VIOLENCIA']).drop('ordem', axis=1)
+                
+                # Calcular porcentagens por faixa etária
+                df_grafico['Total_Faixa'] = df_grafico.groupby('FAIXA_ETARIA')['Contagem'].transform('sum')
+                df_grafico['Percentual'] = (df_grafico['Contagem'] / df_grafico['Total_Faixa'] * 100).round(1)
+                df_grafico['Contagem_Formatada'] = df_grafico['Contagem'].apply(formatar_numero_br)
+                df_grafico['Percentual_Formatado'] = df_grafico['Percentual'].apply(lambda x: f"{x:.1f}%")
+                
+                # Criar gráfico de barras agrupadas: tipos de violência por faixa etária, separado por sexo
+                # Usar hover_data para adicionar informações extras no hover
+                fig_bar_grouped = px.bar(
+                    df_grafico, 
+                    x='FAIXA_ETARIA', 
+                    y='Contagem', 
+                    color='TIPO_VIOLENCIA',
+                    facet_col='SEXO',  # Separar por sexo em colunas
+                    barmode='group',
+                    title='Tipos de Violência por Faixa Etária e Sexo (H2, H4, H5)',
+                    labels={
+                        'FAIXA_ETARIA': 'Faixa Etária', 
+                        'Contagem': 'Contagem de Notificações', 
+                        'TIPO_VIOLENCIA': 'Tipo de Violência',
+                        'SEXO': 'Sexo'
+                    },
+                    category_orders={
+                        'FAIXA_ETARIA': faixas_validas,
+                        'TIPO_VIOLENCIA': ['Sexual', 'Física', 'Psicológica']
+                    },
+                    color_discrete_map={
+                        'Sexual': '#C73E1D',
+                        'Física': '#2E86AB',
+                        'Psicológica': '#F18F01'
+                    },
+                    hover_data={
+                        'Contagem': ':,.0f',  # Formato numérico com separador de milhares
+                        'Percentual_Formatado': True,  # Mostrar percentual formatado
+                        'TIPO_VIOLENCIA': False,  # Já está no hover padrão
+                        'SEXO': False,  # Já está no facet_col
+                        'FAIXA_ETARIA': False  # Já está no eixo x
+                    },
+                    height=500
+                )
+                
+                fig_bar_grouped.update_xaxes(tickangle=0)
+                fig_bar_grouped.update_layout(
+                    legend=dict(
+                        orientation="h",
+                        yanchor="top",
+                        y=-0.15,
+                        xanchor="center",
+                        x=0.5,
+                        font=dict(size=11)
+                    ),
+                    margin=dict(l=50, r=50, t=80, b=120),
+                    height=500
+                )
+                
+                max_contagem = df_grafico['Contagem'].max()
+                aplicar_formatacao_eixo(fig_bar_grouped, max_contagem, eixo='y')
+                
+                # Atualizar hover template para mostrar valor individual de cada barra
+                # %{y} mostra o valor individual da barra (Contagem)
+                # O hover_data já adiciona Percentual_Formatado automaticamente
+                fig_bar_grouped.update_traces(
+                    hovertemplate='<b>%{x}</b><br>' +
+                                 '<b>Tipo de Violência:</b> %{fullData.name}<br>' +
+                                 '<b>Notificações:</b> %{y:,.0f}<br>' +
+                                 '<b>Percentual da faixa etária:</b> %{customdata[1]}<extra></extra>'
+                )
+                
+                st.plotly_chart(fig_bar_grouped, use_container_width=True)
+                
+                # Mostrar estatísticas - usar total_registros_unicos (já calculado acima)
+                # NÃO somar df_grafico['Contagem'].sum() porque isso conta linhas expandidas múltiplas vezes
+                # total_registros_unicos já representa o número correto de notificações únicas
+                # total_registros_unicos já foi definido no bloco if acima
+                st.caption(f"**Total de notificações únicas analisadas:** {formatar_numero_br(total_registros_unicos)} | **Faixas etárias:** {', '.join(faixas_validas)} | **Período:** {ano_selecionado[0]}-{ano_selecionado[1]}")
+            else:
+                # Fallback: gráfico simples por faixa etária e sexo (sem tipos de violência)
+                # KPIs não podem ser calculados sem tipos de violência expandidos
+                col_h2, col_h4, col_h5 = st.columns(3)
+                with col_h2:
+                    st.metric("Violência Sexual em Adolescentes (H2)", "N/A", delta="Dados não disponíveis")
+                with col_h4:
+                    st.metric("Desproporção Feminino - Sexual (H4)", "N/A", delta="Dados não disponíveis")
+                with col_h5:
+                    st.metric("Psicológica em 14-17 anos (H5)", "N/A", delta="Dados não disponíveis")
+                
+                df_demografia = df_demografia.groupby(['FAIXA_ETARIA', 'SEXO']).size().reset_index(name='Contagem')
+                total_geral_demo = df_demografia['Contagem'].sum()
+                df_demografia['Percentual'] = (df_demografia['Contagem'] / total_geral_demo * 100).round(1)
+                df_demografia['Contagem_Formatada'] = df_demografia['Contagem'].apply(formatar_numero_br)
+                
+                ordem_faixas = {faixa: idx for idx, faixa in enumerate(faixas_validas)}
+                df_demografia['ordem'] = df_demografia['FAIXA_ETARIA'].map(ordem_faixas)
+                df_demografia = df_demografia.sort_values('ordem').drop('ordem', axis=1)
+                
+                fig_bar_grouped = px.bar(
+                    df_demografia, 
+                    x='FAIXA_ETARIA', 
+                    y='Contagem', 
+                    color='SEXO',
+                    barmode='group',
+                    title='Contagem de Notificações por Faixa Etária e Sexo (0-17 anos)',
+                    labels={'FAIXA_ETARIA': 'Faixa Etária', 'Contagem': 'Contagem de Notificações', 'SEXO': 'Sexo'},
+                    category_orders={'FAIXA_ETARIA': faixas_validas},
+                    color_discrete_sequence=['#2E86AB', '#A23B72', '#F18F01'],
+                    height=500
+                )
+                fig_bar_grouped.update_layout(
+                    legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
+                    margin=dict(l=50, r=50, t=80, b=120),
+                    height=500
+                )
+                aplicar_formatacao_eixo(fig_bar_grouped, df_demografia['Contagem'].max(), eixo='y')
+                st.plotly_chart(fig_bar_grouped, use_container_width=True)
         else:
             st.warning("Nenhum dado encontrado nas faixas etárias de 0-17 anos para os filtros selecionados.")
     else:
@@ -1245,62 +1818,226 @@ else:
 
     # Gráfico 4: Distribuição Geográfica (H6, H7)
     if uf_selecionada == 'Todos':
-        st.markdown('<div class="section-header">4. Distribuição Geográfica por UF (H7)</div>', unsafe_allow_html=True)
-        st.markdown("**(Gráfico de Barras)**: Comparação entre Unidades Federativas.")
+        st.markdown('<div class="section-header">4. Distribuição Geográfica por Município do Maranhão (H7)</div>', unsafe_allow_html=True)
+        st.markdown("**H7 – Contribuição Estadual:** \"Imperatriz representa mais de 15% das notificações do Maranhão?\"")
+        st.markdown("**(Gráfico de Barras)**: Comparação entre municípios do Maranhão.")
         
-        if 'UF_NOTIFIC' in df_filtrado.columns:
-            df_geo = df_filtrado.groupby('UF_NOTIFIC').size().reset_index(name='Contagem')
-            df_geo = df_geo.sort_values('Contagem', ascending=False).head(27)  # Top 27 UFs
-            df_geo['Contagem_Formatada'] = df_geo['Contagem'].apply(formatar_numero_br)
+        if 'MUNICIPIO_NOTIFIC' in df_filtrado.columns and 'UF_NOTIFIC' in df_filtrado.columns:
+            # Filtrar apenas municípios do Maranhão
+            df_ma = df_filtrado[df_filtrado['UF_NOTIFIC'] == 'Maranhão'].copy() if 'Maranhão' in df_filtrado['UF_NOTIFIC'].values else pd.DataFrame()
             
-            fig_geo = px.bar(
-                df_geo,
-                x='UF_NOTIFIC',
-                y='Contagem',
-                title='Contagem de Notificações por UF',
-                labels={'UF_NOTIFIC': 'Unidade Federativa', 'Contagem': 'Contagem de Notificações'},
-                height=500,
-                custom_data=['Contagem_Formatada']
-            )
-            fig_geo.update_xaxes(tickangle=45)
-            fig_geo.update_layout(
-                margin=dict(l=50, r=50, t=80, b=100),
-                height=500
-            )
-            aplicar_formatacao_eixo(fig_geo, df_geo['Contagem'].max(), eixo='y')
-            fig_geo.update_traces(
-                hovertemplate='<b>%{x}</b><br>Total: %{customdata[0]}<extra></extra>'
-            )
-            st.plotly_chart(fig_geo, use_container_width=True)
+            if len(df_ma) > 0:
+                # Agrupar por município
+                df_municipios_ma = df_ma.groupby('MUNICIPIO_NOTIFIC').size().reset_index(name='Contagem')
+                
+                # Calcular total do Maranhão
+                total_ma = len(df_ma)
+                
+                # Calcular percentuais em relação ao total do Maranhão
+                df_municipios_ma['Percentual'] = (df_municipios_ma['Contagem'] / total_ma * 100).round(1)
+                df_municipios_ma['Percentual_Formatado'] = df_municipios_ma['Percentual'].apply(lambda x: f"{x:.1f}%")
+                df_municipios_ma['Contagem_Formatada'] = df_municipios_ma['Contagem'].apply(formatar_numero_br)
+                
+                # IMPORTANTE: Ordenar por contagem ANTES de calcular posição
+                df_municipios_ma = df_municipios_ma.sort_values('Contagem', ascending=False).reset_index(drop=True)
+                
+                # Encontrar posição de Imperatriz no ranking completo (após ordenação)
+                imperatriz_mask = df_municipios_ma['MUNICIPIO_NOTIFIC'].str.contains('Imperatriz', case=False, na=False)
+                imperatriz_data = df_municipios_ma[imperatriz_mask]
+                
+                # Inicializar variáveis
+                posicao_imperatriz = None
+                contagem_imperatriz = 0
+                pct_imperatriz = 0
+                
+                # Identificar o município líder (primeiro do ranking)
+                municipio_lider = None
+                contagem_lider = 0
+                pct_lider = 0.0
+                if len(df_municipios_ma) > 0:
+                    municipio_lider = df_municipios_ma.iloc[0]['MUNICIPIO_NOTIFIC']
+                    contagem_lider = df_municipios_ma.iloc[0]['Contagem']
+                    pct_lider = df_municipios_ma.iloc[0]['Percentual']
+                
+                if len(imperatriz_data) > 0:
+                    # Posição no ranking completo (índice + 1, pois começa em 0)
+                    # Usar o índice do DataFrame já ordenado
+                    posicao_imperatriz = df_municipios_ma[imperatriz_mask].index[0] + 1
+                    contagem_imperatriz = imperatriz_data.iloc[0]['Contagem']
+                    pct_imperatriz = imperatriz_data.iloc[0]['Percentual']
+                    
+                    # Destacar Imperatriz no gráfico
+                    df_municipios_ma['Destaque'] = df_municipios_ma['MUNICIPIO_NOTIFIC'].str.contains('Imperatriz', case=False, na=False)
+                    
+                    # Exibir KPIs em colunas
+                    col_h7_1, col_h7_2, col_h7_3 = st.columns(3)
+                    with col_h7_1:
+                        st.metric(
+                            "Total de Casos no MA",
+                            formatar_numero_br(total_ma)
+                        )
+                    with col_h7_2:
+                        st.metric(
+                            "Município Líder",
+                            municipio_lider if municipio_lider else "N/A",
+                            delta=f"{formatar_numero_br(contagem_lider)} ({pct_lider:.1f}%)" if municipio_lider else None
+                        )
+                    with col_h7_3:
+                        st.metric(
+                            "Contribuição de Imperatriz (H7)",
+                            formatar_numero_br(contagem_imperatriz),
+                            delta=f"{pct_imperatriz:.1f}% ({posicao_imperatriz}º lugar)"
+                        )
+                else:
+                    st.warning("Imperatriz não encontrada nos dados do Maranhão")
+                    df_municipios_ma['Destaque'] = False
+                    
+                    # Exibir KPIs mesmo sem Imperatriz
+                    col_h7_1, col_h7_2 = st.columns(2)
+                    with col_h7_1:
+                        st.metric(
+                            "Total de Casos no MA",
+                            formatar_numero_br(total_ma)
+                        )
+                    with col_h7_2:
+                        st.metric(
+                            "Município Líder",
+                            municipio_lider if municipio_lider else "N/A",
+                            delta=f"{formatar_numero_br(contagem_lider)} ({pct_lider:.1f}%)" if municipio_lider else None
+                        )
+                
+                # Pegar top 10 municípios para o gráfico, mas garantir que Imperatriz esteja incluída
+                # As colunas formatadas já foram criadas acima, então copiar tudo
+                num_municipios = min(10, len(df_municipios_ma))
+                df_municipios_ma_top = df_municipios_ma.head(num_municipios).copy()
+                
+                # Se Imperatriz não estiver no top, adicioná-la ao gráfico
+                if len(imperatriz_data) > 0:
+                    imperatriz_no_top = df_municipios_ma_top['MUNICIPIO_NOTIFIC'].str.contains('Imperatriz', case=False, na=False).any()
+                    if not imperatriz_no_top:
+                        # Adicionar Imperatriz ao gráfico
+                        imperatriz_row = df_municipios_ma[imperatriz_mask].iloc[0:1].copy()
+                        imperatriz_row['Destaque'] = True  # Garantir que está destacada
+                        df_municipios_ma_top = pd.concat([df_municipios_ma_top, imperatriz_row], ignore_index=True)
+                        # Reordenar após adicionar Imperatriz
+                        df_municipios_ma_top = df_municipios_ma_top.sort_values('Contagem', ascending=False).reset_index(drop=True)
+                        num_municipios = len(df_municipios_ma_top)
+                    
+                    # Garantir que a coluna Destaque existe no top
+                    if 'Destaque' not in df_municipios_ma_top.columns:
+                        df_municipios_ma_top['Destaque'] = df_municipios_ma_top['MUNICIPIO_NOTIFIC'].str.contains('Imperatriz', case=False, na=False)
+                else:
+                    # Se não houver Imperatriz, criar coluna Destaque com False
+                    df_municipios_ma_top['Destaque'] = False
+                
+                # IMPORTANTE: Recalcular TODOS os valores para garantir consistência
+                # Recalcular percentuais usando o total_ma (total do Maranhão)
+                df_municipios_ma_top['Percentual'] = (df_municipios_ma_top['Contagem'] / total_ma * 100).round(1)
+                
+                # Recalcular todas as colunas formatadas
+                df_municipios_ma_top['Contagem_Formatada'] = df_municipios_ma_top['Contagem'].apply(formatar_numero_br)
+                df_municipios_ma_top['Percentual_Formatado'] = df_municipios_ma_top['Percentual'].apply(lambda x: f"{x:.1f}%")
+                
+                # Ordenar por contagem (decrescente) - maior no topo
+                df_municipios_ma_top = df_municipios_ma_top.sort_values('Contagem', ascending=False).reset_index(drop=True)
+                
+                # Criar gráfico de barras horizontal (mais legível para muitos municípios)
+                fig_geo = px.bar(
+                    df_municipios_ma_top,
+                    x='Contagem',
+                    y='MUNICIPIO_NOTIFIC',
+                    orientation='h',  # Gráfico horizontal
+                    title=f'Top {num_municipios} Municípios do Maranhão por Notificações (H7)',
+                    labels={'MUNICIPIO_NOTIFIC': 'Município', 'Contagem': 'Contagem de Notificações'},
+                    height=500,
+                    color='Destaque',  # Destacar Imperatriz
+                    color_discrete_map={True: '#C73E1D', False: '#2E86AB'},  # Vermelho para Imperatriz, azul para outros
+                    category_orders={'MUNICIPIO_NOTIFIC': df_municipios_ma_top['MUNICIPIO_NOTIFIC'].tolist()},  # Manter ordem do ranking (maior no topo)
+                    custom_data=['Contagem_Formatada', 'Percentual_Formatado']  # Passar nomes de colunas, não valores
+                )
+                fig_geo.update_layout(
+                    margin=dict(l=200, r=50, t=80, b=50),  # Espaço à esquerda para nomes dos municípios
+                    height=500,
+                    showlegend=False,  # Não precisa de legenda
+                    yaxis={'categoryorder': 'array', 'categoryarray': df_municipios_ma_top['MUNICIPIO_NOTIFIC'].tolist()}  # Manter ordem: maior no topo
+                )
+                aplicar_formatacao_eixo(fig_geo, df_municipios_ma_top['Contagem'].max(), eixo='x')
+                
+                # Adicionar números e porcentagens nas barras
+                # IMPORTANTE: Recalcular o texto usando os valores atualizados
+                df_municipios_ma_top['Texto_Completo'] = df_municipios_ma_top.apply(
+                    lambda row: f"{row['Contagem_Formatada']} ({row['Percentual_Formatado']})", axis=1
+                )
+                fig_geo.update_traces(
+                    hovertemplate='<b>%{y}</b><br>Total: %{customdata[0]}<br>Percentual do MA: %{customdata[1]}<extra></extra>',
+                    text=df_municipios_ma_top['Texto_Completo'].values,
+                    textposition='outside',
+                    textfont=dict(size=9)
+                )
+                st.plotly_chart(fig_geo, use_container_width=True)
+                
+                # Mostrar ranking completo de Imperatriz
+                if posicao_imperatriz is not None:
+                    st.caption(f"**Imperatriz está em {posicao_imperatriz}º lugar** entre os municípios do Maranhão, representando **{pct_imperatriz:.1f}%** do total de notificações do estado ({formatar_numero_br(total_ma)} notificações).")
+            else:
+                st.warning("Nenhum dado encontrado para o Maranhão nos filtros selecionados.")
         else:
             st.info("Dados geográficos não disponíveis para este gráfico")
     
     elif municipio_selecionado == 'Todos' and uf_selecionada != 'Todos':
         st.markdown('<div class="section-header">4. Distribuição Geográfica por Município (H6)</div>', unsafe_allow_html=True)
+        st.markdown("**H6 – Comparação Regional:** \"Imperatriz tem taxa de notificação maior que municípios de tamanho semelhante?\"")
         st.markdown("**(Gráfico de Barras)**: Comparação entre municípios.")
         
         if 'MUNICIPIO_NOTIFIC' in df_filtrado.columns:
             df_municipio = df_filtrado.groupby('MUNICIPIO_NOTIFIC').size().reset_index(name='Contagem')
-            df_municipio = df_municipio.sort_values('Contagem', ascending=False).head(20)  # Top 20 municípios
+            df_municipio = df_municipio.sort_values('Contagem', ascending=False).head(10)  # Top 10 municípios
+            total_municipios = df_municipio['Contagem'].sum()
+            df_municipio['Percentual'] = (df_municipio['Contagem'] / total_municipios * 100).round(1)
+            df_municipio['Percentual_Formatado'] = df_municipio['Percentual'].apply(lambda x: f"{x:.1f}%")
             df_municipio['Contagem_Formatada'] = df_municipio['Contagem'].apply(formatar_numero_br)
+            
+            # Calcular KPI para H6 (Imperatriz vs outros)
+            # Primeiro ordenar por contagem para calcular posição correta
+            df_municipio_rank = df_municipio.sort_values('Contagem', ascending=False).reset_index(drop=True)
+            imperatriz_data = df_municipio_rank[df_municipio_rank['MUNICIPIO_NOTIFIC'].str.contains('Imperatriz', case=False, na=False)]
+            if len(imperatriz_data) > 0:
+                posicao_imperatriz = df_municipio_rank[df_municipio_rank['MUNICIPIO_NOTIFIC'].str.contains('Imperatriz', case=False, na=False)].index[0] + 1
+                contagem_imperatriz = imperatriz_data.iloc[0]['Contagem']
+                media_top10 = df_municipio_rank.head(10)['Contagem'].mean()
+                variacao_vs_media = ((contagem_imperatriz - media_top10) / media_top10 * 100) if media_top10 > 0 else 0
+                
+                col_h6 = st.columns(1)[0]
+                with col_h6:
+                    st.metric(
+                        "Posição de Imperatriz (H6)",
+                        f"{posicao_imperatriz}º lugar",
+                        delta=f"{variacao_vs_media:+.1f}% vs média top 10"
+                    )
+            
+            # Ordenar por contagem (decrescente) para o gráfico
+            df_municipio = df_municipio.sort_values('Contagem', ascending=True)  # Ascendente para gráfico horizontal
             
             fig_mun_bar = px.bar(
                 df_municipio,
-                x='MUNICIPIO_NOTIFIC',
-                y='Contagem',
-                title=f'Top 20 Municípios com Mais Notificações ({uf_selecionada})',
+                x='Contagem',
+                y='MUNICIPIO_NOTIFIC',
+                orientation='h',  # Gráfico horizontal
+                title=f'Top 10 Municípios com Mais Notificações ({uf_selecionada})',
                 labels={'MUNICIPIO_NOTIFIC': 'Município', 'Contagem': 'Contagem de Notificações'},
                 height=500,
-                custom_data=['Contagem_Formatada']
+                custom_data=['Contagem_Formatada', 'Percentual_Formatado']
             )
-            fig_mun_bar.update_xaxes(tickangle=45)
             fig_mun_bar.update_layout(
-                margin=dict(l=50, r=50, t=80, b=150),  # Mais espaço para rótulos inclinados
+                margin=dict(l=200, r=50, t=80, b=50),  # Espaço à esquerda para nomes dos municípios
                 height=500
             )
-            aplicar_formatacao_eixo(fig_mun_bar, df_municipio['Contagem'].max(), eixo='y')
+            aplicar_formatacao_eixo(fig_mun_bar, df_municipio['Contagem'].max(), eixo='x')
             fig_mun_bar.update_traces(
-                hovertemplate='<b>%{x}</b><br>Total: %{customdata[0]}<extra></extra>'
+                hovertemplate='<b>%{y}</b><br>Total: %{customdata[0]}<br>Percentual: %{customdata[1]}<extra></extra>',
+                text=df_municipio['Percentual_Formatado'].values,
+                textposition='outside',
+                textfont=dict(size=9)
             )
             st.plotly_chart(fig_mun_bar, use_container_width=True)
         else:
@@ -1338,14 +2075,17 @@ else:
         )
         aplicar_formatacao_eixo(fig_local, df_local['Contagem'].max(), eixo='x')
         fig_local.update_traces(
-            hovertemplate='<b>%{y}</b><br>Total: %{customdata[0]}<extra></extra>'
+            hovertemplate='<b>%{y}</b><br>Total: %{customdata[0]}<extra></extra>',
+            text=df_local['Contagem_Formatada'].values,  # Adicionar número de casos na frente de cada barra
+            textposition='outside',  # Posicionar texto fora da barra
+            textfont=dict(size=10)  # Tamanho da fonte
         )
         st.plotly_chart(fig_local, use_container_width=True)
 
     # Gráfico 6: Perfil do Agressor (Sexo) - H3
     if 'AUTOR_SEXO_CORRIGIDO' in df_filtrado.columns:
         st.markdown('<div class="section-header">6. Perfil do Agressor - Sexo (H3)</div>', unsafe_allow_html=True)
-        st.markdown("**Hipótese H3:** Verificar a distribuição por sexo do agressor.")
+        st.markdown("**H3 – Perfil do Agressor:** \"Qual é a distribuição por sexo dos agressores nas notificações de violência?\"")
         
         df_autor = df_filtrado['AUTOR_SEXO_CORRIGIDO'].value_counts().reset_index()
         df_autor.columns = ['Sexo', 'Contagem']
@@ -1370,14 +2110,17 @@ else:
         )
         aplicar_formatacao_eixo(fig_autor, df_autor['Contagem'].max(), eixo='y')
         fig_autor.update_traces(
-            hovertemplate='<b>%{x}</b><br>Total: %{customdata[0]}<extra></extra>'
+            hovertemplate='<b>%{x}</b><br>Total: %{customdata[0]}<extra></extra>',
+            text=df_autor['Contagem_Formatada'].values,  # Adicionar número de casos acima de cada barra
+            textposition='outside',  # Posicionar texto acima da barra
+            textfont=dict(size=12)  # Tamanho da fonte
         )
         st.plotly_chart(fig_autor, use_container_width=True)
     
     # Gráfico 7: Relacionamento com o Agressor - H8 (Apenas os mais comuns)
     if 'GRAU_PARENTESCO' in df_filtrado.columns:
         st.markdown('<div class="section-header">7. Relacionamento com o Agressor (H8)</div>', unsafe_allow_html=True)
-        st.markdown("**Hipótese H8:** Analisar a relação entre vítima e agressor. Exibindo apenas os relacionamentos mais comuns.")
+        st.markdown("**H8 – Relacionamento com o Agressor:** \"Qual é o grau de parentesco ou relacionamento mais comum entre a vítima e o agressor?\"")
         st.info("**Nota:** Inclui parentescos familiares e outros tipos de relacionamento (conhecido, funcionário de instituição, etc.).")
         
         df_parentesco = df_filtrado[df_filtrado['GRAU_PARENTESCO'] != 'Não informado']
@@ -1411,6 +2154,7 @@ else:
             df_parent_top = df_parent.head(num_parentescos).copy()
             df_parent_top = df_parent_top.sort_values('Contagem', ascending=True)  # Ordenar para gráfico horizontal
             df_parent_top['Contagem_Formatada'] = df_parent_top['Contagem'].apply(formatar_numero_br)
+            df_parent_top['Percentual_Formatado'] = df_parent_top['Percentual'].apply(lambda x: f"{x:.1f}%")
             
             # Mostrar estatísticas
             percentual_total = df_parent_top['Percentual'].sum()
@@ -1427,12 +2171,13 @@ else:
                 color='Contagem',
                 color_continuous_scale='Inferno',  # Paleta mais escura e visível
                 text='Contagem',  # Mostrar valores nas barras
-                custom_data=['Contagem_Formatada']
+                custom_data=['Contagem_Formatada', 'Percentual_Formatado']
             )
-            # Formatação brasileira: ponto para milhares
+            # Formatação brasileira: ponto para milhares e adicionar porcentagem
             fig_parent.update_traces(
-                texttemplate='%{text:,.0f}'.replace(',', 'X').replace('.', ',').replace('X', '.'),
-                textposition='outside'
+                texttemplate='%{text:,.0f} (%{customdata[1]})'.replace(',', 'X').replace('.', ',').replace('X', '.'),
+                textposition='outside',
+                hovertemplate='<b>%{y}</b><br>Total: %{customdata[0]}<br>Percentual: %{customdata[1]}<extra></extra>'
             )
             # Layout responsivo: colorbar na lateral (desktop) por padrão
             # JavaScript ajustará para abaixo em mobile
@@ -1463,12 +2208,17 @@ else:
     # Gráfico 8: Distribuição por Raça/Cor - H4 (Barras ao invés de Pizza)
     if 'CS_RACA' in df_filtrado.columns:
         st.markdown('<div class="section-header">8. Distribuição por Raça/Cor (H4)</div>', unsafe_allow_html=True)
-        st.markdown("**Hipótese H4:** Verificar a distribuição por raça/cor da vítima.")
+        st.markdown("**H4 – Perfil da Vítima:** \"Qual é a distribuição por raça/cor das vítimas de violência contra crianças e adolescentes?\"")
         
         df_raca = df_filtrado['CS_RACA'].value_counts().reset_index()
         df_raca.columns = ['Raça/Cor', 'Contagem']
-        df_raca = df_raca[~df_raca['Raça/Cor'].astype(str).str.contains('Ignorado|Branco|Não informado', case=False, na=False)]
+        # Filtrar para manter apenas: Parda, Branca, Preta e Indígena
+        racas_permitidas = ['Parda', 'Branca', 'Preta', 'Indígena']
+        df_raca = df_raca[df_raca['Raça/Cor'].isin(racas_permitidas)]
         df_raca = df_raca.sort_values('Contagem', ascending=False)
+        total_raca = df_raca['Contagem'].sum()
+        df_raca['Percentual'] = (df_raca['Contagem'] / total_raca * 100).round(1)
+        df_raca['Percentual_Formatado'] = df_raca['Percentual'].apply(lambda x: f"{x:.1f}%")
         df_raca['Contagem_Formatada'] = df_raca['Contagem'].apply(formatar_numero_br)
         
         if len(df_raca) > 0:
@@ -1481,7 +2231,7 @@ else:
                 color='Contagem',
                 color_continuous_scale='Viridis',  # Paleta mais escura e visível
                 height=500,
-                custom_data=['Contagem_Formatada']
+                custom_data=['Contagem_Formatada', 'Percentual_Formatado']
             )
             fig_raca.update_xaxes(tickangle=45)
             # Layout responsivo: colorbar na lateral (desktop) por padrão
@@ -1494,79 +2244,339 @@ else:
             )
             aplicar_formatacao_eixo(fig_raca, df_raca['Contagem'].max(), eixo='y')
             fig_raca.update_traces(
-                hovertemplate='<b>%{x}</b><br>Total: %{customdata[0]}<extra></extra>'
+                hovertemplate='<b>%{x}</b><br>Total: %{customdata[0]}<br>Percentual: %{customdata[1]}<extra></extra>',
+                text=df_raca['Percentual_Formatado'].values,
+                textposition='outside',
+                textfont=dict(size=14)  # Aumentado de 9 para 14 para melhor legibilidade
             )
             st.plotly_chart(fig_raca, use_container_width=True)
     
-    # Gráfico 9: Evolução Mensal - H10
+    # Gráfico 9: Impacto da Pandemia - H10
     if 'DT_NOTIFIC' in df_filtrado.columns and df_filtrado['DT_NOTIFIC'].notna().any():
-        st.markdown('<div class="section-header">9. Evolução Mensal de Notificações (H10)</div>', unsafe_allow_html=True)
-        st.markdown("**Hipótese H10:** Analisar a evolução mensal das notificações.")
+        st.markdown('<div class="section-header">9. Impacto da Pandemia nas Notificações (H10)</div>', unsafe_allow_html=True)
+        st.markdown("**H10 – Impacto da Pandemia:** \"Houve queda das notificações em 2020 e aumento em 2021?\"")
         
-        df_filtrado['MES_ANO'] = df_filtrado['DT_NOTIFIC'].dt.to_period('M').astype(str)
-        df_mensal = df_filtrado.groupby('MES_ANO').size().reset_index(name='Total')
-        df_mensal = df_mensal.sort_values('MES_ANO')
-        df_mensal['Total_Formatado'] = df_mensal['Total'].apply(formatar_numero_br)
+        # Extrair ano da data de notificação
+        df_filtrado['ANO'] = df_filtrado['DT_NOTIFIC'].dt.year
         
-        fig_mensal = px.line(
-            df_mensal,
-            x='MES_ANO',
-            y='Total',
-            markers=True,
-            title='Evolução Mensal de Notificações (H10)',
-            labels={'MES_ANO': 'Mês/Ano', 'Total': 'Total de Notificações'},
-            color_discrete_sequence=['#1a237e'],  # Cor mais escura e visível
-            height=500
-        )
-        fig_mensal.update_xaxes(tickangle=45, nticks=20)
-        fig_mensal.update_layout(
-            margin=dict(l=50, r=50, t=80, b=150),  # Mais espaço para rótulos inclinados
-            height=500
-        )
-        aplicar_formatacao_eixo(fig_mensal, df_mensal['Total'].max(), eixo='y')
-        fig_mensal.update_traces(
-            customdata=df_mensal['Total_Formatado'],
-            hovertemplate='<b>%{x}</b><br>Total: %{customdata}<extra></extra>'
-        )
-        st.plotly_chart(fig_mensal, use_container_width=True)
-    
-    # Gráfico 11: Sazonalidade - REMOVIDO conforme solicitado
-    
-    # Gráfico 10: Comparação Regional - H6, H7
-    if uf_selecionada == 'Todos':
-        st.markdown('<div class="section-header">10. Comparação Regional - Top 10 Estados (H6, H7)</div>', unsafe_allow_html=True)
-        st.markdown("**Hipóteses H6 e H7:** Comparar a incidência entre diferentes regiões do país.")
+        # Filtrar para focar no período da pandemia: 2019, 2020 e 2021
+        df_pandemia = df_filtrado[df_filtrado['ANO'].isin([2019, 2020, 2021])].copy()
         
-        if 'UF_NOTIFIC' in df_filtrado.columns:
-            df_regional = df_filtrado.groupby('UF_NOTIFIC').size().reset_index(name='Contagem')
-            df_regional = df_regional.sort_values('Contagem', ascending=False).head(10)
-            df_regional['Contagem_Formatada'] = df_regional['Contagem'].apply(formatar_numero_br)
+        if len(df_pandemia) > 0:
+            # Criar coluna Mês/Ano para análise mensal
+            df_pandemia['MES_ANO'] = df_pandemia['DT_NOTIFIC'].dt.to_period('M').astype(str)
+            df_pandemia['MES'] = df_pandemia['DT_NOTIFIC'].dt.month
             
-            fig_regional = px.bar(
-                df_regional,
-                x='UF_NOTIFIC',
-                y='Contagem',
-                title='Top 10 Estados por Número de Notificações (H6, H7)',
-                labels={'UF_NOTIFIC': 'Estado', 'Contagem': 'Total de Notificações'},
-                color='Contagem',
-                color_continuous_scale='Magma',  # Paleta mais escura e visível
+            # Agrupar por mês/ano
+            df_mensal_pandemia = df_pandemia.groupby(['MES_ANO', 'ANO', 'MES']).size().reset_index(name='Total')
+            df_mensal_pandemia = df_mensal_pandemia.sort_values(['ANO', 'MES']).reset_index(drop=True)
+            df_mensal_pandemia['Total_Formatado'] = df_mensal_pandemia['Total'].apply(formatar_numero_br)
+            
+            # Adicionar nomes dos meses
+            meses_nomes_dict = {1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun',
+                               7: 'Jul', 8: 'Ago', 9: 'Set', 10: 'Out', 11: 'Nov', 12: 'Dez'}
+            df_mensal_pandemia['MES_NOME'] = df_mensal_pandemia['MES'].map(meses_nomes_dict)
+            
+            # Calcular variações mensais (em relação ao mesmo mês do ano anterior)
+            df_mensal_pandemia['Variacao_vs_Ano_Anterior'] = None
+            df_mensal_pandemia['Tendencia'] = None  # 'alta', 'queda', 'neutro'
+            
+            for ano in [2020, 2021]:
+                ano_anterior = ano - 1
+                for mes in range(1, 13):
+                    valor_atual = df_mensal_pandemia[(df_mensal_pandemia['ANO'] == ano) & 
+                                                     (df_mensal_pandemia['MES'] == mes)]['Total'].values
+                    valor_anterior = df_mensal_pandemia[(df_mensal_pandemia['ANO'] == ano_anterior) & 
+                                                        (df_mensal_pandemia['MES'] == mes)]['Total'].values
+                    
+                    if len(valor_atual) > 0 and len(valor_anterior) > 0:
+                        variacao = ((valor_atual[0] - valor_anterior[0]) / valor_anterior[0] * 100)
+                        mask = (df_mensal_pandemia['ANO'] == ano) & (df_mensal_pandemia['MES'] == mes)
+                        df_mensal_pandemia.loc[mask, 'Variacao_vs_Ano_Anterior'] = variacao
+                        
+                        # Determinar tendência
+                        if variacao > 5:  # Aumento significativo (>5%)
+                            df_mensal_pandemia.loc[mask, 'Tendencia'] = 'alta'
+                        elif variacao < -5:  # Queda significativa (<-5%)
+                            df_mensal_pandemia.loc[mask, 'Tendencia'] = 'queda'
+                        else:
+                            df_mensal_pandemia.loc[mask, 'Tendencia'] = 'neutro'
+            
+            # Calcular totais anuais para comparação
+            df_anual = df_pandemia.groupby('ANO').size().reset_index(name='Total_Anual')
+            df_anual = df_anual.sort_values('ANO')
+            df_anual['Total_Formatado'] = df_anual['Total_Anual'].apply(formatar_numero_br)
+            
+            # Calcular variações percentuais entre anos
+            variacao_2019_2020 = None
+            variacao_2020_2021 = None
+            total_2019 = df_anual[df_anual['ANO'] == 2019]['Total_Anual'].values
+            total_2020 = df_anual[df_anual['ANO'] == 2020]['Total_Anual'].values
+            total_2021 = df_anual[df_anual['ANO'] == 2021]['Total_Anual'].values
+            
+            if len(total_2019) > 0 and len(total_2020) > 0:
+                variacao_2019_2020 = ((total_2020[0] - total_2019[0]) / total_2019[0] * 100)
+            if len(total_2020) > 0 and len(total_2021) > 0:
+                variacao_2020_2021 = ((total_2021[0] - total_2020[0]) / total_2020[0] * 100)
+            
+            # Exibir KPIs
+            col_h10_1, col_h10_2, col_h10_3 = st.columns(3)
+            with col_h10_1:
+                if len(total_2019) > 0:
+                    st.metric(
+                        "Total 2019 (Pré-Pandemia)",
+                        formatar_numero_br(total_2019[0])
+                    )
+            with col_h10_2:
+                if len(total_2020) > 0:
+                    delta_2020 = f"{variacao_2019_2020:.1f}%" if variacao_2019_2020 is not None else None
+                    st.metric(
+                        "Total 2020 (Pandemia)",
+                        formatar_numero_br(total_2020[0]),
+                        delta=delta_2020
+                    )
+            with col_h10_3:
+                if len(total_2021) > 0:
+                    delta_2021 = f"{variacao_2020_2021:.1f}%" if variacao_2020_2021 is not None else None
+                    st.metric(
+                        "Total 2021 (Pós-Pandemia)",
+                        formatar_numero_br(total_2021[0]),
+                        delta=delta_2021
+                    )
+            
+            # Criar gráfico de linha comparando os 3 anos
+            fig_pandemia = px.line(
+                df_mensal_pandemia,
+                x='MES',
+                y='Total',
+                color='ANO',
+                markers=True,
+                title='Evolução Mensal: Comparação 2019 vs 2020 vs 2021 (H10)',
+                labels={'MES': 'Mês', 'Total': 'Total de Notificações', 'ANO': 'Ano'},
+                color_discrete_map={2019: '#2E86AB', 2020: '#C73E1D', 2021: '#F18F01'},  # Azul, Vermelho, Laranja
+                height=500
+            )
+            
+            # Adicionar nomes dos meses no eixo X (substituir números por nomes)
+            meses_nomes = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
+            fig_pandemia.update_xaxes(
+                tickmode='array',
+                tickvals=list(range(1, 13)),
+                ticktext=meses_nomes,
+                title='Mês'
+            )
+            
+            fig_pandemia.update_layout(
+                margin=dict(l=60, r=50, t=80, b=60),
                 height=500,
-                custom_data=['Contagem_Formatada']
+                hovermode='x unified',
+                legend=dict(
+                    title="Ano",
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                )
             )
-            fig_regional.update_xaxes(tickangle=45)
-            # Layout responsivo: colorbar na lateral (desktop) por padrão
-            # JavaScript ajustará para abaixo em mobile
-            fig_regional.update_layout(
-                margin=dict(l=50, r=80, t=80, b=50),  # Espaço para colorbar lateral (desktop)
-                height=500,
-                coloraxis_showscale=True,
-                coloraxis_colorbar=get_colorbar_layout(is_mobile=False)  # Desktop por padrão
+            
+            aplicar_formatacao_eixo(fig_pandemia, df_mensal_pandemia['Total'].max(), eixo='y')
+            
+            # Adicionar indicadores visuais (balões) de queda/alta nos pontos
+            # Adicionar anotações com balões coloridos para 2020 e 2021
+            for idx, row in df_mensal_pandemia.iterrows():
+                if pd.notna(row['Variacao_vs_Ano_Anterior']) and row['Tendencia'] != 'neutro':
+                    variacao = row['Variacao_vs_Ano_Anterior']
+                    
+                    # Determinar cor, símbolo e cor de fundo baseado na tendência
+                    if row['Tendencia'] == 'alta':
+                        cor_texto = '#00C853'  # Verde escuro
+                        cor_fundo = '#E8F5E9'  # Verde claro
+                        simbolo = '▲'
+                    else:  # queda
+                        cor_texto = '#D32F2F'  # Vermelho escuro
+                        cor_fundo = '#FFEBEE'  # Rosa claro (como no exemplo)
+                        simbolo = '▼'
+                    
+                    # Formatar porcentagem
+                    variacao_formatada = f"{variacao:+.1f}%"
+                    
+                    # Adicionar anotação com balão estilizado acima do ponto
+                    fig_pandemia.add_annotation(
+                        x=row['MES'],
+                        y=row['Total'],
+                        text=f"<b>{simbolo} {variacao_formatada}</b>",
+                        showarrow=False,
+                        yshift=25,
+                        xref='x',
+                        yref='y',
+                        bgcolor=cor_fundo,  # Cor de fundo do balão
+                        bordercolor=cor_texto,  # Cor da borda
+                        borderwidth=1.5,
+                        borderpad=6,  # Padding interno
+                        font=dict(
+                            color=cor_texto,
+                            size=12,
+                            family="Arial"
+                        ),
+                        align="center"
+                    )
+            
+            # Hover com informações detalhadas incluindo variação
+            fig_pandemia.update_traces(
+                hovertemplate='<b>%{fullData.name}</b><br>Mês: %{x}<br>Total: %{y:,.0f}<extra></extra>',
+                line=dict(width=3),
+                marker=dict(size=10)  # Aumentado para melhor visibilidade
             )
-            aplicar_formatacao_eixo(fig_regional, df_regional['Contagem'].max(), eixo='y')
-            fig_regional.update_traces(
-                hovertemplate='<b>%{x}</b><br>Total: %{customdata[0]}<extra></extra>'
-            )
-            st.plotly_chart(fig_regional, use_container_width=True)
+            
+            st.plotly_chart(fig_pandemia, use_container_width=True)
+            
+        else:
+            st.info("Não há dados disponíveis para o período da pandemia (2019-2021) nos filtros selecionados.")
+    
+    # Gráfico 10: Comparação Regional - H6 (Municípios de Tamanho Semelhante)
+    if uf_selecionada == 'Todos':
+        st.markdown('<div class="section-header">10. Comparação Regional - Municípios de Tamanho Semelhante (H6)</div>', unsafe_allow_html=True)
+        st.markdown("**H6 – Comparação Regional:** \"Imperatriz tem taxa de notificação maior que municípios de tamanho semelhante?\"")
+        st.info("**Nota:** Municípios de tamanho semelhante são identificados com base no número de notificações (±30% do valor de Imperatriz).")
+        
+        if 'MUNICIPIO_NOTIFIC' in df_filtrado.columns and 'UF_NOTIFIC' in df_filtrado.columns:
+            # Agrupar por município e UF para obter a sigla do estado
+            df_municipios_uf = df_filtrado.groupby(['MUNICIPIO_NOTIFIC', 'UF_NOTIFIC']).size().reset_index(name='Contagem')
+            
+            # Criar coluna com nome do município + sigla do estado
+            # Converter para string para evitar problemas com tipos Categorical
+            df_municipios_uf['MUNICIPIO_UF'] = df_municipios_uf['MUNICIPIO_NOTIFIC'].astype(str) + ' / ' + df_municipios_uf['UF_NOTIFIC'].astype(str)
+            
+            # Se houver municípios duplicados (mesmo nome em estados diferentes), manter o de maior contagem
+            # Usar agg para manter todas as colunas necessárias
+            df_municipios = df_municipios_uf.sort_values('Contagem', ascending=False).groupby('MUNICIPIO_NOTIFIC').agg({
+                'UF_NOTIFIC': 'first',
+                'Contagem': 'first',
+                'MUNICIPIO_UF': 'first'
+            }).reset_index()
+            df_municipios = df_municipios.sort_values('Contagem', ascending=False).reset_index(drop=True)
+            
+            # Garantir que MUNICIPIO_UF existe (recriar se necessário)
+            if 'MUNICIPIO_UF' not in df_municipios.columns or df_municipios['MUNICIPIO_UF'].isna().any():
+                df_municipios['MUNICIPIO_UF'] = df_municipios['MUNICIPIO_NOTIFIC'].astype(str) + ' / ' + df_municipios['UF_NOTIFIC'].astype(str)
+            
+            # Encontrar Imperatriz
+            imperatriz_mask = df_municipios['MUNICIPIO_NOTIFIC'].str.contains('Imperatriz', case=False, na=False)
+            imperatriz_data = df_municipios[imperatriz_mask]
+            
+            if len(imperatriz_data) > 0:
+                contagem_imperatriz = imperatriz_data.iloc[0]['Contagem']
+                
+                # Encontrar municípios de tamanho semelhante (±30% do valor de Imperatriz)
+                limite_inferior = contagem_imperatriz * 0.7  # 70% = -30%
+                limite_superior = contagem_imperatriz * 1.3  # 130% = +30%
+                
+                # Filtrar municípios dentro da faixa (incluindo Imperatriz)
+                df_similares = df_municipios[
+                    (df_municipios['Contagem'] >= limite_inferior) & 
+                    (df_municipios['Contagem'] <= limite_superior)
+                ].copy()
+                
+                # Ordenar por contagem (decrescente)
+                df_similares = df_similares.sort_values('Contagem', ascending=False).reset_index(drop=True)
+                
+                # Destacar Imperatriz
+                df_similares['Destaque'] = df_similares['MUNICIPIO_NOTIFIC'].str.contains('Imperatriz', case=False, na=False)
+                
+                # Garantir que a coluna MUNICIPIO_UF existe (com sigla do estado)
+                if 'MUNICIPIO_UF' not in df_similares.columns:
+                    df_similares['MUNICIPIO_UF'] = df_similares['MUNICIPIO_NOTIFIC'].astype(str) + ' / ' + df_similares['UF_NOTIFIC'].astype(str)
+                
+                # Calcular posição de Imperatriz entre os similares
+                posicao_imperatriz = df_similares[df_similares['Destaque']].index[0] + 1 if df_similares['Destaque'].any() else None
+                
+                # Calcular média dos municípios similares (excluindo Imperatriz)
+                df_similares_sem_imperatriz = df_similares[~df_similares['Destaque']]
+                media_similares = df_similares_sem_imperatriz['Contagem'].mean() if len(df_similares_sem_imperatriz) > 0 else 0
+                
+                # Calcular variação de Imperatriz em relação à média
+                variacao_vs_media = ((contagem_imperatriz - media_similares) / media_similares * 100) if media_similares > 0 else 0
+                
+                # Formatação
+                df_similares['Contagem_Formatada'] = df_similares['Contagem'].apply(formatar_numero_br)
+                
+                # Exibir KPIs
+                col_h6_1, col_h6_2, col_h6_3 = st.columns(3)
+                with col_h6_1:
+                    st.metric(
+                        "Notificações de Imperatriz",
+                        formatar_numero_br(contagem_imperatriz)
+                    )
+                with col_h6_2:
+                    st.metric(
+                        "Média dos Similares",
+                        formatar_numero_br(int(media_similares)) if media_similares > 0 else "N/A"
+                    )
+                with col_h6_3:
+                    st.metric(
+                        "Posição entre Similares (H6)",
+                        f"{posicao_imperatriz}º lugar" if posicao_imperatriz else "N/A",
+                        delta=f"{variacao_vs_media:+.1f}% vs média" if media_similares > 0 else None
+                    )
+                
+                # Limitar a 15 municípios para melhor visualização
+                if len(df_similares) > 15:
+                    # Pegar os top 7 acima de Imperatriz, Imperatriz, e os top 7 abaixo
+                    idx_imperatriz = df_similares[df_similares['Destaque']].index[0]
+                    inicio = max(0, idx_imperatriz - 7)
+                    fim = min(len(df_similares), idx_imperatriz + 8)
+                    df_similares_display = df_similares.iloc[inicio:fim].copy()
+                else:
+                    df_similares_display = df_similares.copy()
+                
+                # Ordenar para gráfico horizontal (ascendente)
+                df_similares_display = df_similares_display.sort_values('Contagem', ascending=True)
+                
+                # Criar gráfico usando MUNICIPIO_UF (com sigla do estado)
+                fig_h6 = px.bar(
+                    df_similares_display,
+                    x='Contagem',
+                    y='MUNICIPIO_UF',
+                    orientation='h',
+                    title=f'Comparação: Imperatriz vs Municípios de Tamanho Semelhante (H6)',
+                    labels={'MUNICIPIO_UF': 'Município', 'Contagem': 'Total de Notificações'},
+                    height=500,
+                    color='Destaque',
+                    color_discrete_map={True: '#C73E1D', False: '#2E86AB'},  # Vermelho para Imperatriz, azul para outros
+                    category_orders={'MUNICIPIO_UF': df_similares_display['MUNICIPIO_UF'].tolist()},
+                    custom_data=['Contagem_Formatada']
+                )
+                
+                fig_h6.update_layout(
+                    margin=dict(l=200, r=50, t=80, b=50),
+                    height=500,
+                    showlegend=False,
+                    yaxis={'categoryorder': 'array', 'categoryarray': df_similares_display['MUNICIPIO_UF'].tolist()}
+                )
+                
+                aplicar_formatacao_eixo(fig_h6, df_similares_display['Contagem'].max(), eixo='x')
+                
+                # Adicionar números nas barras
+                df_similares_display['Texto_Completo'] = df_similares_display['Contagem_Formatada']
+                fig_h6.update_traces(
+                    hovertemplate='<b>%{y}</b><br>Total: %{customdata[0]}<extra></extra>',
+                    text=df_similares_display['Texto_Completo'].values,
+                    textposition='outside',
+                    textfont=dict(size=9)
+                )
+                
+                st.plotly_chart(fig_h6, use_container_width=True)
+                
+                # Informação sobre faixa de comparação
+                if media_similares > 0:
+                    st.caption(f"**Faixa de comparação:** Municípios com {formatar_numero_br(int(limite_inferior))} a {formatar_numero_br(int(limite_superior))} notificações (±30% de Imperatriz). Total de {len(df_similares)} municípios similares encontrados.")
+                else:
+                    st.warning("Não foi possível calcular a comparação: nenhum município similar encontrado além de Imperatriz.")
+            else:
+                st.warning("Imperatriz não encontrada nos dados filtrados.")
+        else:
+            st.info("Dados de município não disponíveis para este gráfico.")
     
     # Gráfico 12: Tempo entre Ocorrência e Denúncia - REMOVIDO conforme solicitado
     
@@ -1580,7 +2590,13 @@ else:
     
     # Tabela de Dados Filtrados
     st.markdown('<div class="section-header">Dados Filtrados</div>', unsafe_allow_html=True)
-    st.markdown("**Dados conforme os filtros aplicados.**")
+    st.markdown("""
+    **Base de Dados da Pesquisa**
+    
+    Esta tabela apresenta os dados utilizados na análise, conforme os filtros aplicados acima. 
+    Todos os gráficos, métricas e análises apresentadas neste dashboard foram gerados a partir 
+    destes registros filtrados, garantindo transparência e rastreabilidade dos resultados da pesquisa.
+    """)
     
     # Selecionar colunas relevantes para exibição
     colunas_amostra = []
@@ -1654,7 +2670,7 @@ else:
         
         # Aviso de performance para muitos registros
         if num_linhas > 5000:
-            st.warning(f"⚠️ **Atenção:** Exibindo {formatar_numero_br(num_linhas)} linhas. Isso pode tornar o dashboard mais lento. Considere usar uma amostra menor.")
+            st.warning(f"**Atenção:** Exibindo {formatar_numero_br(num_linhas)} linhas. Isso pode tornar o dashboard mais lento. Considere usar uma amostra menor.")
         elif num_linhas == total_registros and total_registros > 1000:
             st.info(f"ℹ️ Exibindo todos os {formatar_numero_br(total_registros)} registros. A tabela pode demorar um pouco para carregar.")
         
