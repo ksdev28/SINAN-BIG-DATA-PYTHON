@@ -11,7 +11,6 @@ Usando dados reais do SINAN sem cruzar com IBGE
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import re
 import sys
 from pathlib import Path
@@ -24,7 +23,7 @@ if str(project_root) not in sys.path:
 
 # Tentar importar DuckDB (opcional - melhora performance)
 try:
-    import duckdb
+    import duckdb  # noqa: F401
     DUCKDB_AVAILABLE = True
     from src.processors.sinan_data_processor_duckdb import SINANDataProcessorDuckDB
 except ImportError:
@@ -576,11 +575,11 @@ def create_derived_columns(df):
                 # Converter para string primeiro para garantir formato
                 df[col_name] = df[col_name].astype(str).replace(['nan', 'None', 'NaT'], None)
                 df[col_name] = pd.to_datetime(df[col_name], format='%Y%m%d', errors='coerce')
-            except Exception as e:
+            except Exception:
                 try:
                     # Tentar outros formatos
                     df[col_name] = pd.to_datetime(df[col_name], errors='coerce')
-                except:
+                except Exception:
                     # Se falhar, manter como está
                     pass
         return df
@@ -1638,10 +1637,10 @@ else:
                 df_psicologica_grafico = df_grafico[df_grafico['TIPO_VIOLENCIA'] == 'Psicológica']
                 if len(df_psicologica_grafico) > 0:
                     total_psicologica_h5 = df_psicologica_grafico['Contagem'].sum()
-                    contagem_14_17_h5 = df_psicologica_grafico[df_psicologica_grafico['FAIXA_ETARIA'] == '14-17 anos']['Contagem'].sum()
+                    contagem_14_17_h5 = df_psicologica_grafico.loc[df_psicologica_grafico['FAIXA_ETARIA'] == '14-17 anos', 'Contagem'].sum()
                     # Calcular também outras faixas para comparação
-                    contagem_10_13_h5 = df_psicologica_grafico[df_psicologica_grafico['FAIXA_ETARIA'] == '10-13 anos']['Contagem'].sum()
-                    contagem_6_9_h5 = df_psicologica_grafico[df_psicologica_grafico['FAIXA_ETARIA'] == '6-9 anos']['Contagem'].sum()
+                    contagem_10_13_h5 = df_psicologica_grafico.loc[df_psicologica_grafico['FAIXA_ETARIA'] == '10-13 anos', 'Contagem'].sum()
+                    contagem_6_9_h5 = df_psicologica_grafico.loc[df_psicologica_grafico['FAIXA_ETARIA'] == '6-9 anos', 'Contagem'].sum()
                     pct_14_17_h5 = (contagem_14_17_h5 / total_psicologica_h5 * 100) if total_psicologica_h5 > 0 else 0
                     pct_10_13_h5 = (contagem_10_13_h5 / total_psicologica_h5 * 100) if total_psicologica_h5 > 0 else 0
                     pct_6_9_h5 = (contagem_6_9_h5 / total_psicologica_h5 * 100) if total_psicologica_h5 > 0 else 0
@@ -2089,6 +2088,7 @@ else:
         df_autor = df_filtrado['AUTOR_SEXO_CORRIGIDO'].value_counts().reset_index()
         df_autor.columns = ['Sexo', 'Contagem']
         df_autor = df_autor[df_autor['Sexo'] != 'Não informado']  # Filtrar valores inválidos
+        df_autor = df_autor.sort_values('Contagem', ascending=False).reset_index(drop=True)  # Ordenar por contagem (decrescente)
         df_autor['Contagem_Formatada'] = df_autor['Contagem'].apply(formatar_numero_br)
         
         fig_autor = px.bar(
@@ -2100,6 +2100,7 @@ else:
             color='Sexo',
             color_discrete_sequence=['#2E86AB', '#A23B72', '#F18F01', '#C73E1D'],  # Cores escuras e visíveis
             height=450,
+            category_orders={'Sexo': df_autor['Sexo'].tolist()},  # Garantir ordem específica
             custom_data=['Contagem_Formatada']
         )
         fig_autor.update_layout(
@@ -2108,11 +2109,20 @@ else:
             height=450
         )
         aplicar_formatacao_eixo(fig_autor, df_autor['Contagem'].max(), eixo='y')
+        
+        # Criar dicionário para mapear sexo -> texto formatado
+        texto_por_sexo = dict(zip(df_autor['Sexo'], df_autor['Contagem_Formatada']))
+        
+        # Atualizar cada trace com o texto correto
+        for trace in fig_autor.data:
+            if hasattr(trace, 'name') and trace.name in texto_por_sexo:
+                trace.text = [texto_por_sexo[trace.name]]
+            trace.textposition = 'outside'
+            trace.textfont = dict(size=12)
+        
+        # Hover template
         fig_autor.update_traces(
-            hovertemplate='<b>%{x}</b><br>Total: %{customdata[0]}<extra></extra>',
-            text=df_autor['Contagem_Formatada'].values,  # Adicionar número de casos acima de cada barra
-            textposition='outside',  # Posicionar texto acima da barra
-            textfont=dict(size=12)  # Tamanho da fonte
+            hovertemplate='<b>%{x}</b><br>Total: %{customdata[0]}<extra></extra>'
         )
         st.plotly_chart(fig_autor, use_container_width=True)
     

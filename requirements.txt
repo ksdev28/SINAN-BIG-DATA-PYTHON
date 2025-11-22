@@ -1,16 +1,15 @@
 # Dependências para Análise de Violência Infantil
+# Bibliotecas Essenciais
 pandas>=2.2.0
 numpy>=2.3.0
 streamlit>=1.49.0
 plotly>=5.15.0
-dbfread>=2.0.7
-pathlib2>=2.3.7
-scipy>=1.9.0
-scikit-learn>=1.1.0
-seaborn>=0.13.0
-matplotlib>=3.10.0
 pyarrow>=10.0.0
-psutil>=5.9.0
+
+# Performance (Opcional mas Recomendado)
 duckdb>=0.9.0
+
+# Desenvolvimento e Monitoramento
+psutil>=5.9.0
 jupyter>=1.0.0
 jupyterlab>=4.0.0
