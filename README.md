@@ -37,7 +37,10 @@ SINAN-BIG-DATA-PYTHON/
 ├── docs/                       # Documentação
 │   ├── README_DASHBOARD.md
 │   ├── README_DUCKDB.md
-│   └── ANALISE_TECNICA_COMPLETA.md
+│   ├── ANALISE_TECNICA.md
+│   ├── ESTRUTURA_PROJETO.md
+│   ├── COMO_USAR_NOTEBOOKS.md
+│   └── COMANDOS_JUPYTER.md
 │
 └── reports/                    # Relatórios gerados
     ├── relatorio_colunas_sinan.txt
@@ -75,11 +78,7 @@ python scripts/preprocess_data.py
 **Opção 1: Usando o script (Recomendado)**
 
 ```bash
-# Windows (duplo clique ou execute no terminal)
-run_dashboard.bat
-# Ou PowerShell:
-.\run_dashboard.ps1
-# Ou Python (funciona em qualquer OS):
+# Execute o script Python (funciona em qualquer OS):
 python run_dashboard.py
 ```
 
@@ -90,7 +89,9 @@ python run_dashboard.py
 streamlit run src/dashboard_sinan_real_data.py
 ```
 
-### 3. Executar Análises
+O dashboard será aberto automaticamente no seu navegador padrão, geralmente em `http://localhost:8501`.
+
+### 4. Executar Análises
 
 ```bash
 # Scripts de análise
@@ -98,17 +99,23 @@ python scripts/explore_columns.py
 python scripts/analise_status_casos.py
 
 # Notebooks Jupyter
-python -m notebook notebooks/analise_performance_dados.ipynb
+# Instale o Jupyter primeiro: pip install jupyter jupyterlab
+jupyter notebook notebooks/analise_performance_dados.ipynb
 # Ou use JupyterLab (mais moderno):
-python -m jupyterlab
+jupyter lab
 ```
+
+**Nota:** Para mais informações sobre como usar os notebooks, consulte [COMO_USAR_NOTEBOOKS.md](docs/COMO_USAR_NOTEBOOKS.md).
 
 ## 📊 Funcionalidades
 
 - **Dashboard Interativo**: Visualização de dados SINAN com filtros dinâmicos
-- **Processamento Otimizado**: Suporte a DuckDB para queries rápidas em grandes volumes
+- **Processamento Otimizado**: Suporte a DuckDB para queries rápidas em grandes volumes (opcional)
 - **Análises Estatísticas**: Distribuições, tendências e padrões
-- **Análise de Performance**: Identificação de gargalos e otimizações
+- **Validação de Hipóteses**: Teste de 10 hipóteses específicas sobre violência contra crianças e adolescentes
+- **Análises Temporais**: Identificação de tendências e padrões ao longo do tempo
+- **Análises Demográficas**: Distribuição por faixa etária, sexo e raça/cor
+- **Análises Geográficas**: Distribuição por municípios e estados
 
 ## 🔧 Tecnologias
 
@@ -118,62 +125,13 @@ python -m jupyterlab
 - **Plotly**: Visualizações interativas
 - **Jupyter**: Análises exploratórias
 
-## 🚂 Deploy no Railway
-
-O projeto está configurado para deploy no Railway. O script de inicialização (`start_railway.py`) automaticamente:
-
-1. Verifica se os dados pré-processados existem
-2. Executa o preprocessamento se necessário
-3. Inicia o dashboard Streamlit
-
-### Como fazer deploy:
-
-1. **Instale o Railway CLI** (opcional, mas recomendado):
-
-   ```bash
-   npm i -g @railway/cli
-   ```
-
-2. **Faça login no Railway**:
-
-   ```bash
-   railway login
-   ```
-
-3. **Inicialize um novo projeto**:
-
-   ```bash
-   railway init
-   ```
-
-4. **Configure as variáveis de ambiente** (se necessário):
-
-   ```bash
-   railway variables set PORT=8501
-   ```
-
-5. **Faça o deploy**:
-   ```bash
-   railway up
-   ```
-
-**Importante:**
-
-- Os dados brutos (`data/raw/VIOLBR-PARQUET/`) devem estar no repositório ou ser carregados via volume persistente
-- O Railway executará o preprocessamento na primeira inicialização
-- O arquivo `.railwayignore` está configurado para otimizar o upload
-
-### Arquivos de Configuração Railway:
-
-- `railway.json` - Configuração do Railway
-- `start_railway.py` - Script de inicialização
-- `.railwayignore` - Arquivos a ignorar no deploy
-
 ## 📝 Documentação Adicional
 
-- [Documentação do Dashboard](docs/README_DASHBOARD.md)
-- [Documentação DuckDB](docs/README_DUCKDB.md)
-- [Análise Técnica Completa](docs/ANALISE_TECNICA_COMPLETA.md)
+- [Documentação do Dashboard](docs/README_DASHBOARD.md) - Guia completo sobre o dashboard e suas funcionalidades
+- [Documentação DuckDB](docs/README_DUCKDB.md) - Como usar DuckDB para melhor performance
+- [Análise Técnica](docs/ANALISE_TECNICA.md) - Análise técnica detalhada do projeto
+- [Estrutura do Projeto](docs/ESTRUTURA_PROJETO.md) - Detalhes sobre a organização do código
+- [Como Usar Notebooks](docs/COMO_USAR_NOTEBOOKS.md) - Guia para trabalhar com Jupyter Notebooks
 
 ## 📌 Notas
 
