@@ -5,35 +5,6 @@ from pathlib import Path
 import streamlit as st
 from .sinan_data_processor_comprehensive import SINANDataProcessorComprehensive
 
-class SINANDuckDBAdapter:
-    """
-    Adapter to interact with SINAN data using DuckDB for efficient on-demand querying.
-    Replaces loading the entire dataset into memory.
-    """
-    
-    def __init__(self, violence_data_path="data/raw/VIOLBR-PARQUET", dict_path="data/config/TAB_SINANONLINE", db_path="data/processed/sinan.duckdb"):
-        self.violence_data_path = Path(violence_data_path)
-        self.dict_path = Path(dict_path)
-        self.db_path = Path(db_path)
-        
-        # Check if snapshot exists
-        if self.db_path.exists():
-            print(f"[DuckDB] Connecting to snapshot database: {self.db_path}")
-            # Connect to persistent DB (read_only=True to allow concurrent reads if needed)
-            self.conn = duckdb.connect(str(self.db_path), read_only=True)
-            self.table_name = "violence_processed"
-            self.using_snapshot = True
-        else:
-            print("[DuckDB] Snapshot not found. Falling back to raw Parquet view (Slower).")
-            # Initialize DuckDB connection (in-memory)
-            self.conn = duckdb.connect(database=':memory:')
-            # Register the view over parquet files
-            parquet_pattern = str(self.violence_data_path / "*.parquet")
-            self.conn.execute(f"CREATE OR REPLACE VIEW violence_raw AS SELECT * FROM read_parquet('{parquet_pattern}', hive_partitioning=1, union_by_name=1)")
-            self.table_name = "violence_raw"
-            self.using_snapshot = False
-
-        # Initialize the comprehensive processor (still needed for some metadata or fallback)
         self.processor = SINANDataProcessorComprehensive(violence_data_path, dict_path)
         if not self.using_snapshot:
              self.processor.load_dictionaries()
