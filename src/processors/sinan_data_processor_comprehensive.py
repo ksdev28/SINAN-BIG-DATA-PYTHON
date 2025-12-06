@@ -530,12 +530,231 @@ class SINANDataProcessorComprehensive:
         
         return summary
 
+    
+    def create_derived_columns(self, df):
+        """
+        Cria todas as colunas derivadas necessárias para o dashboard.
+        Centraliza a lógica que antes estava espalhada no dashboard.
+        """
+        print("[INFO] Criando colunas derivadas (ETL)...")
+        # Evitar SettingWithCopyWarning
+        df = df.copy()
+        
+        # 1. Processar Datas e Ano
+        if 'DT_NOTIFIC' in df.columns:
+            # Tentar converter apenas se não for datetime
+            if not pd.api.types.is_datetime64_any_dtype(df['DT_NOTIFIC']):
+                df['DT_NOTIFIC'] = pd.to_datetime(df['DT_NOTIFIC'], errors='coerce')
+            df['ANO_NOTIFIC'] = df['DT_NOTIFIC'].dt.year
+        elif 'NU_ANO' in df.columns:
+            df['ANO_NOTIFIC'] = pd.to_numeric(df['NU_ANO'], errors='coerce')
+            
+        # 2. Faixa Etária (Reusar logica existente ou aprimorada)
+        # O dashboard usa uma logica complexa de regex. O processor ja tem create_faixa_etaria.
+        # Vamos garantir que create_faixa_etaria seja chamada.
+        if 'FAIXA_ETARIA' not in df.columns:
+            df = self.create_faixa_etaria(df)
+            
+        # 3. UF de Notificação (Nome)
+        uf_dict = {
+            '11': 'Rondônia', '12': 'Acre', '13': 'Amazonas', '14': 'Roraima',
+            '15': 'Pará', '16': 'Amapá', '17': 'Tocantins', '21': 'Maranhão',
+            '22': 'Piauí', '23': 'Ceará', '24': 'Rio Grande do Norte', '25': 'Paraíba',
+            '26': 'Pernambuco', '27': 'Alagoas', '28': 'Sergipe', '29': 'Bahia',
+            '31': 'Minas Gerais', '32': 'Espírito Santo', '33': 'Rio de Janeiro',
+            '35': 'São Paulo', '41': 'Paraná', '42': 'Santa Catarina', '43': 'Rio Grande do Sul',
+            '50': 'Mato Grosso do Sul', '51': 'Mato Grosso', '52': 'Goiás', '53': 'Distrito Federal'
+        }
+        
+        def map_uf(val):
+            if pd.isna(val): return 'Não informado'
+            val_str = str(val).strip()
+            # Tentar direto
+            if val_str in uf_dict: return uf_dict[val_str]
+            # Tentar float->int->str
+            try:
+                if val_str.replace('.','',1).isdigit():
+                    val_int = str(int(float(val_str)))
+                    if val_int in uf_dict: return uf_dict[val_int]
+            except: pass
+            return val_str
+            
+        if 'SG_UF_NOT' in df.columns:
+            print("   [INFO] Mapeando UFs...")
+            # Otimização: usar map que é muito mais rapido que apply para dicionarios
+            # Mas map nao lida bem com a logica de fallback complexa. Apply é seguro.
+            df['UF_NOTIFIC'] = df['SG_UF_NOT'].apply(map_uf)
+        elif 'SG_UF' in df.columns:
+            df['UF_NOTIFIC'] = df['SG_UF'].apply(map_uf)
+        else:
+            df['UF_NOTIFIC'] = 'N/A'
+            
+        # 4. Município (Nome)
+        # Importar aqui para evitar ciclo se necessario, ou assumir que utils existe
+        try:
+            from src.utils.munic_dict_loader import load_municipality_dict
+            municip_dict = load_municipality_dict()
+            
+            print("   [INFO] Mapeando Municipios...")
+            def map_municipio(codigo):
+                if pd.isna(codigo): return 'Não informado'
+                c = str(codigo).strip()
+                if len(c) == 6 and c in municip_dict: return municip_dict[c]
+                return c
+            
+            col_munic = 'ID_MUNICIP' if 'ID_MUNICIP' in df.columns else 'ID_MN_RESI' if 'ID_MN_RESI' in df.columns else None
+            if col_munic:
+                df['MUNICIPIO_NOTIFIC'] = df[col_munic].apply(map_municipio)
+            else:
+                df['MUNICIPIO_NOTIFIC'] = 'N/A'
+        except ImportError:
+            print("[AVISO] Nao foi possivel carregar dicionario de municipios. Pulando.")
+            df['MUNICIPIO_NOTIFIC'] = df['ID_MUNICIP'] if 'ID_MUNICIP' in df.columns else 'N/A'
+
+        # 5. Tipo de Violencia (Consolidado)
+        print("   [INFO] Consolidando Tipos de Violencia...")
+        def get_violence_type(row):
+            types = []
+            # Assumindo que ja passou por apply_dictionaries e os valores sao 'Sim'/'Não' etc
+            # Mas o apply_dictionaries original pode ter mantido codigos se nao achou.
+            # O processor.apply_dictionaries mapeia '1'->'Sim'.
+            # Vamos checar 'Sim', '1', 'S'.
+            
+            check = ['Sim', 'SIM', '1', 'S', '1.0']
+            
+            if str(row.get('VIOL_FISIC', '')).strip() in check: types.append('Física')
+            if str(row.get('VIOL_PSICO', '')).strip() in check: types.append('Psicológica')
+            if str(row.get('VIOL_SEXU', '')).strip() in check: types.append('Sexual')
+            if str(row.get('VIOL_INFAN', '')).strip() in check: types.append('Infantil')
+            
+            if not types: types.append('Não especificado')
+            return ', '.join(types)
+
+        df['TIPO_VIOLENCIA'] = df.apply(get_violence_type, axis=1)
+        
+        # 6. Sexo (Simples)
+        if 'CS_SEXO' in df.columns:
+            def map_sex(val):
+                s = str(val).strip().upper()
+                if s in ['1', 'M', 'MASCULINO']: return 'Masculino'
+                if s in ['2', 'F', 'FEMININO']: return 'Feminino'
+                return 'Ignorado'
+            
+            df['SEXO'] = df['CS_SEXO'].apply(map_sex)
+            
+        # 7. Tempo Ocorrencia-Denuncia
+        if 'DT_OCOR' in df.columns and 'DT_NOTIFIC' in df.columns:
+            try:
+                # Converter para datetime se nao for
+                if not pd.api.types.is_datetime64_any_dtype(df['DT_OCOR']):
+                    df['DT_OCOR'] = pd.to_datetime(df['DT_OCOR'], errors='coerce')
+                
+                mask_validas = df['DT_NOTIFIC'].notna() & df['DT_OCOR'].notna()
+                df['TEMPO_OCOR_DENUNCIA'] = None
+                if mask_validas.any():
+                    df.loc[mask_validas, 'TEMPO_OCOR_DENUNCIA'] = (df.loc[mask_validas, 'DT_NOTIFIC'] - df.loc[mask_validas, 'DT_OCOR']).dt.days
+                    # Limpar invalidos
+                    df.loc[mask_validas, 'TEMPO_OCOR_DENUNCIA'] = df.loc[mask_validas, 'TEMPO_OCOR_DENUNCIA'].apply(lambda x: x if pd.notna(x) and 0 <= x <= 3650 else None)
+            except Exception as e:
+                print(f"[AVISO] Erro ao calcular TEMPO_OCOR_DENUNCIA: {e}")
+                df['TEMPO_OCOR_DENUNCIA'] = None
+                
+        # 8. Encaminhamentos Justica
+        enc_cols = ['ENC_DELEG', 'ENC_DPCA', 'ENC_MPU', 'ENC_VARA']
+        if any(c in df.columns for c in enc_cols):
+            def get_enc(row):
+                encs = []
+                check = ['1', 'SIM', 'S', '1.0']
+                for c in enc_cols:
+                    if c in row.index and pd.notna(row[c]):
+                        val = str(row[c]).upper().strip()
+                        if val in check or (val.isdigit() and int(val) == 1):
+                            if c == 'ENC_DELEG': encs.append('Delegacia')
+                            elif c == 'ENC_DPCA': encs.append('DPCA')
+                            elif c == 'ENC_MPU': encs.append('Min. Público')
+                            elif c == 'ENC_VARA': encs.append('Vara Infância')
+                return ', '.join(encs) if encs else 'Nenhum'
+            df['ENCAMINHAMENTOS_JUSTICA'] = df.apply(get_enc, axis=1)
+        else:
+            df['ENCAMINHAMENTOS_JUSTICA'] = 'Não informado'
+            
+        # 9. Autor Sexo Corrigido
+        if 'AUTOR_SEXO' in df.columns:
+            def map_as(val):
+                if pd.isna(val): return 'Não informado'
+                s = str(val).upper().strip()
+                if s in ['1', 'M', 'MASCULINO']: return 'Masculino'
+                if s in ['2', 'F', 'FEMININO']: return 'Feminino'
+                if s in ['3', 'OUTROS']: return 'Outros'
+                return 'Não informado'
+            df['AUTOR_SEXO_CORRIGIDO'] = df['AUTOR_SEXO'].apply(map_as)
+        else:
+             df['AUTOR_SEXO_CORRIGIDO'] = 'Não informado'
+             
+        # 10. Grau Parentesco
+        rel_cols = [c for c in df.columns if c.startswith('REL_') and c not in ['REL_TRAB', 'REL_CAT']]
+        
+        # Dicionário de Mapeamento Completo
+        RELACIONAMENTO_DICT = {
+            'REL_PAI': 'Pai',
+            'REL_MAE': 'Mãe',
+            'REL_PAD': 'Padrasto',
+            'REL_MAD': 'Madrasta',
+            'REL_CONJ': 'Cônjuge',
+            'REL_EXCON': 'Ex-cônjuge',
+            'REL_NAMO': 'Namorado(a)',
+            'REL_EXNAM': 'Ex-namorado(a)',
+            'REL_FILHO': 'Filho(a)',
+            'REL_IRMAO': 'Irmão(ã)',
+            'REL_AMIGO': 'Amigo(a)/Conhecido', # Agrupando se necessario ou separando
+            'REL_CONHEC': 'Conhecido',
+            'REL_DESCON': 'Desconhecido',
+            'REL_CUIDAD': 'Cuidador(a)',
+            'REL_PATRAO': 'Patrão/Chefe',
+            'REL_INST': 'Institucional',
+            'REL_POL': 'Policial/Agente',
+            'REL_PROPRI': 'Própria Pessoa',
+            'REL_OUTROS': 'Outros'
+        }
+        
+        if rel_cols:
+            def get_rel(row):
+                rels = []
+                check = ['1', 'SIM', 'S', '1.0']
+                for c in rel_cols:
+                    if c in row.index and pd.notna(row[c]):
+                        val = str(row[c]).upper().strip()
+                        if val in check:
+                            # Prioridade: Dicionário
+                            if c in RELACIONAMENTO_DICT:
+                                r = RELACIONAMENTO_DICT[c]
+                            else:
+                                # Fallback: Nome legivel
+                                r = c.replace('REL_', '').replace('_', ' ').title()
+                                # Ajustes comuns para colunas nao mapeadas
+                                if 'Pai' in r: r = 'Pai'
+                                elif 'Mae' in r: r = 'Mãe'
+                                elif 'Padr' in r: r = 'Padrasto'
+                                elif 'Madr' in r: r = 'Madrasta'
+                                elif 'Conjug' in r: r = 'Cônjuge'
+                                elif 'Exnam' in r: r = 'Ex-namorado(a)'
+                                elif 'Namor' in r: r = 'Namorado(a)'
+                                elif 'Amig' in r: r = 'Amigo(a)'
+                                elif 'Descon' in r: r = 'Desconhecido'
+                            
+                            if r not in rels:
+                                rels.append(r)
+                return ', '.join(rels) if rels else 'Não informado'
+            df['GRAU_PARENTESCO'] = df.apply(get_rel, axis=1)
+        else:
+            df['GRAU_PARENTESCO'] = 'Não informado'
+        
+        print(f"[OK] Colunas derivadas criadas. Cols: {len(df.columns)}")
+        return df
+
 if __name__ == "__main__":
     # Teste do processador
     processor = SINANDataProcessorComprehensive()
-    child_data, population_data, stats = processor.process_all_data()
-    
-    # Mostrar resumo
-    summary = processor.get_analysis_summary()
-    print("\n[INFO] RESUMO DA ANALISE:")
-    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    # child_data, population_data, stats = processor.process_all_data()
+    # ...
+

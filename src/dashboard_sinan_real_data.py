@@ -25,7 +25,7 @@ if str(project_root) not in sys.path:
 try:
     import duckdb  # noqa: F401
     DUCKDB_AVAILABLE = True
-    from src.processors.sinan_data_processor_duckdb import SINANDataProcessorDuckDB
+    from src.processors.sinan_duckdb_adapter import SINANDuckDBAdapter
 except ImportError:
     DUCKDB_AVAILABLE = False
     st.info("**Dica:** Instale DuckDB para melhor performance: `pip install duckdb`")
@@ -431,220 +431,57 @@ class MinimalProcessor:
         self.dictionaries = {}
 
 # Carregamento e Tratamento dos Dados
-@st.cache_data(ttl=3600, max_entries=1)  # Limitar cache para evitar MemoryError
-def load_sinan_data(use_duckdb=True, use_preprocessed=True):
+@st.cache_resource(ttl=3600)
+def get_adapter():
+    """Initializes and caches the DuckDB Adapter"""
+    if DUCKDB_AVAILABLE:
+        return SINANDuckDBAdapter()
+    return None
+
+def load_sinan_data_on_demand(adapter, ano_range, uf_selecionada, municipio_selecionado):
     """
-    Carrega dados reais do SINAN dos arquivos parquet (otimizado para grandes volumes)
-    
-    Args:
-        use_duckdb: Se True e DuckDB disponível, usa DuckDB para melhor performance (fallback)
-        use_preprocessed: Se True, tenta carregar dados pré-processados primeiro (mais rápido)
+    Carrega dados sob demanda usando DuckDB.
     """
-    # Verificar se existem dados pré-processados
-    if use_preprocessed:
-        processed_file = project_root / "data" / "processed" / "sinan_data_processed.parquet"
-        if processed_file.exists():
-            try:
-                print("[INFO] Carregando dados pre-processados...")
-                # Carregar apenas as colunas necessárias para reduzir memória
-                # Usar engine='pyarrow' para melhor performance
-                df = pd.read_parquet(processed_file, engine='pyarrow')
-                print(f"[OK] Dados pre-processados carregados: {len(df):,} registros")
-                print(f"[OK] Total de colunas: {len(df.columns)}")
-                
-                # Verificar se as colunas essenciais existem
-                colunas_essenciais = ['NU_IDADE_N', 'DT_NOTIFIC', 'CS_SEXO']
-                colunas_faltando = [col for col in colunas_essenciais if col not in df.columns]
-                if colunas_faltando:
-                    print(f"[AVISO] Colunas faltando nos dados pre-processados: {colunas_faltando}")
-                    print("[INFO] Continuando com processamento normal...")
-                    raise ValueError(f"Colunas essenciais faltando: {colunas_faltando}")
-                
-                # Verificar se as colunas derivadas já existem
-                colunas_derivadas = ['ANO_NOTIFIC', 'TIPO_VIOLENCIA', 'SEXO', 'UF_NOTIFIC', 'FAIXA_ETARIA']
-                colunas_derivadas_faltando = [col for col in colunas_derivadas if col not in df.columns]
-                
-                if colunas_derivadas_faltando:
-                    print(f"[INFO] Criando colunas derivadas faltantes: {colunas_derivadas_faltando}")
-                    df = create_derived_columns(df)
-                else:
-                    print("[OK] Todas as colunas derivadas ja existem nos dados pre-processados")
-                
-                # PULAR filtro de violência - dados pré-processados já estão filtrados
-                # Os dados em data/processed/ já foram filtrados durante o pré-processamento
-                # Aplicar o filtro novamente seria redundante e lento
-                print("[OK] Dados pré-processados já contêm apenas casos de violência (filtro aplicado durante pré-processamento)")
-                
-                # Criar um processador mínimo apenas para compatibilidade
-                processor = MinimalProcessor()
-                
-                print("[OK] Dados pre-processados prontos para uso!")
-                return df, processor
-            except Exception as e:
-                print(f"[ERRO] Erro ao carregar dados pre-processados: {e}")
-                import traceback
-                print(f"[DEBUG] Traceback completo:")
-                traceback.print_exc()
-                print("[INFO] Continuando com processamento normal...")
-    
-    try:
-        # Usar DuckDB se disponível (muito mais rápido)
-        if use_duckdb and DUCKDB_AVAILABLE:
-            print("[INFO] Usando DuckDB para carregamento otimizado...")
-            violence_path = project_root / "data" / "raw" / "VIOLBR-PARQUET"
-            dict_path = project_root / "data" / "config" / "TAB_SINANONLINE"
-            with SINANDataProcessorDuckDB(
-                violence_data_path=str(violence_path),
-                dict_path=str(dict_path)
-            ) as processor_duckdb:
-                # Carregar dicionários
-                processor_duckdb.load_dictionaries()
-                
-                # Carregar dados filtrados diretamente (muito mais eficiente)
-                child_data_raw = processor_duckdb.load_filtered_violence_data(
-                    age_filter=True,
-                    violence_filter=True
-                )
-                
-                if child_data_raw is None or len(child_data_raw) == 0:
-                    st.error("Nenhum dado encontrado nos arquivos parquet")
-                    return None, None
-                
-                # Usar o processador original para aplicar dicionários
-                processor = processor_duckdb.processor
-                
-                # Aplicar dicionários apenas nos dados filtrados
-                decoded_data = processor.apply_dictionaries(child_data_raw)
-                del child_data_raw
-                
-                # Preparar dados para visualização
-                df = decoded_data.copy(deep=False)
-                processor = processor_duckdb.processor
-                # Pular o resto do processamento, já está feito
-                skip_processing = True
-        else:
-            skip_processing = False
+    if adapter:
+        # Passar filtros para o DuckDB (Ano e UF agora sao passados para SQL)
+        df = adapter.get_filtered_data(year_range=ano_range, uf=uf_selecionada)
         
-        if not skip_processing:
-            # Fallback para método original
-            print("Usando metodo tradicional (pandas)...")
-            violence_path = project_root / "data" / "raw" / "VIOLBR-PARQUET"
-            dict_path = project_root / "data" / "config" / "TAB_SINANONLINE"
-            processor = SINANDataProcessorComprehensive(
-                violence_data_path=str(violence_path),
-                dict_path=str(dict_path)
-            )
+        # Aplicar transformações de colunas derivadas (CRITICO para os filtros funcionarem)
+        if df is not None and not df.empty:
+            df = create_derived_columns(df)
             
-            # Carregar dicionários
-            processor.load_dictionaries()
+            # --- FILTRAGEM EM MEMORIA (REFINAMENTO) ---
+            # O DuckDB retornou dados da faixa etaria e anos corretos.
+            # Agora filtramos UF e Municipio e Tipo usando Pandas (dataframe menor)
             
-            # Carregar dados de violência
-            violence_data = processor.load_violence_data()
-            
-            if violence_data is None or len(violence_data) == 0:
-                st.error("Nenhum dado encontrado nos arquivos parquet")
-                return None, None
-            
-            # OTIMIZAÇÃO: Filtrar por idade ANTES de aplicar dicionários
-            # Isso reduz drasticamente o tamanho dos dados
-            print("Filtrando por idade primeiro (0-17 anos)...")
-            
-            # Filtrar por código de idade diretamente (mais eficiente)
-            if 'NU_IDADE_N' in violence_data.columns:
-                # Códigos de idade: 4000 (menor de 1 ano) até 4017 (17 anos)
-                # Formato: 4000, 4001, ..., 4009, 4010, 4011, ..., 4017
-                age_codes = [f'400{i}' if i < 10 else f'40{i}' for i in range(0, 18)]
+            # 1. Filtro UF
+            if uf_selecionada != 'Todos':
+                df = df[df['UF_NOTIFIC'] == uf_selecionada]
                 
-                # Converter para string e filtrar
-                age_str = violence_data['NU_IDADE_N'].astype(str)
-                age_filter = age_str.isin(age_codes)
+            # 2. Filtro Municipio
+            if municipio_selecionado != 'Todos':
+                df = df[df['MUNICIPIO_NOTIFIC'] == municipio_selecionado]
                 
-                child_data_raw = violence_data[age_filter].copy(deep=False)
-                
-                filtered_count = len(child_data_raw)
-                total_count = len(violence_data)
-                percentage = (filtered_count/total_count*100) if total_count > 0 else 0
-                
-                print(f"   Dados filtrados: {filtered_count:,} registros de {total_count:,} ({percentage:.1f}%)")
-                
-                if filtered_count == 0:
-                    print("   ATENCAO: Nenhum registro encontrado com codigos de idade 0-17 anos")
-                    print(f"   Verificando valores unicos de idade (primeiros 20):")
-                    unique_ages = violence_data['NU_IDADE_N'].value_counts().head(20)
-                    print(f"   {unique_ages.to_dict()}")
-                
-                # Liberar memória do DataFrame original
-                del violence_data
-            else:
-                print("   AVISO: Coluna NU_IDADE_N nao encontrada")
-                child_data_raw = violence_data.copy(deep=False)
-                del violence_data
+            return df, adapter.processor
             
-            # Aplicar dicionários apenas nos dados filtrados (muito menor)
-            # Processar apenas colunas essenciais para economizar memória
-            essential_columns = [
-                'DT_NOTIFIC', 'NU_ANO', 'SG_UF_NOT', 'SG_UF', 'ID_MUNICIP', 'ID_MN_RESI',
-                'NU_IDADE_N', 'CS_SEXO', 'VIOL_FISIC', 'VIOL_PSICO', 'VIOL_SEXU', 'VIOL_INFAN',
-                'LOCAL_OCOR', 'AUTOR_SEXO', 'AUTOR_ALCO', 'CS_ESCOL_N', 'CS_RACA'
-            ]
-            
-            # Colunas adicionais importantes para análises avançadas
-            additional_columns = [
-                'DT_OCOR',      # Data de ocorrência (para calcular tempo até denúncia)
-                'DT_ENCERRA',  # Data de encerramento (para status do caso)
-                'DT_DIGITA',   # Data de digitação
-                'DT_INVEST',   # Data de investigação
-                'EVOLUCAO',    # Evolução do caso (encerrado, abandonado, etc.)
-                'ENC_DELEG',   # Encaminhamento para delegacia
-                'ENC_DPCA',    # Encaminhamento para DPCA (Delegacia de Proteção à Criança)
-                'ENC_MPU',     # Encaminhamento para Ministério Público
-                'ENC_VARA',    # Encaminhamento para Vara da Infância
-                'DELEG',       # Delegacia
-                'DELEG_CRIA',  # Delegacia da Criança
-                'DELEG_IDOS',  # Delegacia do Idoso
-                'DELEG_MULH',  # Delegacia da Mulher
-                'HORA_OCOR',   # Hora da ocorrência
-                'CLASSI_FIN'   # Classificação final
-            ]
-            
-            # Manter apenas colunas essenciais + todas as colunas REL_ e outras importantes
-            available_essential = [col for col in essential_columns if col in child_data_raw.columns]
-            available_additional = [col for col in additional_columns if col in child_data_raw.columns]
-            rel_cols = [col for col in child_data_raw.columns if col.startswith('REL_')]
-            other_cols = [col for col in child_data_raw.columns if col in ['SIT_CONJUG', 'ID_OCUPA_N', 'REDE_SAU', 'REDE_EDUCA']]
-            
-            columns_to_keep = list(set(available_essential + available_additional + rel_cols + other_cols))
-            child_data_subset = child_data_raw[columns_to_keep].copy(deep=False)
-            
-            decoded_data = processor.apply_dictionaries(child_data_subset)
-            
-            # Liberar memória após processar
-            del child_data_raw
-            del child_data_subset
-            
-            # Filtrar violência contra crianças e adolescentes (0-17 anos)
-            # Agora já está filtrado por idade, só precisa verificar tipos de violência
-            child_data = processor.filter_comprehensive_violence(decoded_data, already_filtered_by_age=True)
-            
-            # Preparar dados para visualização (usar shallow copy)
-            df = child_data.copy(deep=False)
-        
-        # Aplicar transformações de colunas derivadas
-        df = create_derived_columns(df)
-        
-        return df, processor
-        
-    except Exception as e:
-        st.error(f"Erro ao carregar dados: {str(e)}")
-        import traceback
-        st.error(traceback.format_exc())
-        return None, None
+    return None, None
+
+# Manter funcao antiga apenas para compatibilidade ou fallback se necessario
+# (Mas agora o fluxo principal deve usar o adapter)
+
 
 def create_derived_columns(df):
     """
     Cria todas as colunas derivadas necessárias para o dashboard
     Esta função é chamada tanto para dados pré-processados quanto para dados processados normalmente
     """
+    # 0. OTIMIZAÇÃO: Se as colunas já existem (vindas do snapshot ETL), pular processamento
+    # Verificamos TIPO_VIOLENCIA e UF_NOTIFIC como proxy de que o ETL já rodou
+    if df is not None and 'TIPO_VIOLENCIA' in df.columns and 'UF_NOTIFIC' in df.columns and 'FAIXA_ETARIA' in df.columns:
+        # Verificar se não estão vazias (safety check)
+        if not df['TIPO_VIOLENCIA'].isna().all():
+            return df
+
     # Função auxiliar para processar datas
     def process_date_column(df, col_name):
         """Processa coluna de data no formato YYYYMMDD"""
@@ -1063,33 +900,6 @@ def process_tipos_violencia_expandidos_demo(df_demografia):
     
     return df_tipos_expandidos_demo
 
-# Carregar dados
-try:
-    with st.spinner("Carregando dados do SINAN (isso pode levar alguns segundos)..."):
-        df, processor = load_sinan_data()
-except MemoryError:
-    # Se houver erro de memória, limpar cache e tentar novamente
-    st.cache_data.clear()
-    st.warning("Cache limpo devido a erro de memória. Recarregando dados...")
-    with st.spinner("Recarregando dados do SINAN..."):
-        df, processor = load_sinan_data()
-except Exception as e:
-    st.error(f"Erro ao carregar dados: {str(e)}")
-    st.info("**Dicas para resolver:**\n"
-             "1. Verifique se o arquivo `data/processed/sinan_data_processed.parquet` existe\n"
-             "2. Tente limpar o cache: Menu → Settings → Clear cache\n"
-             "3. Se o problema persistir, execute o script de pré-processamento novamente")
-    st.stop()
-
-if df is None or len(df) == 0:
-    st.error("Não foi possível carregar os dados. Verifique se os arquivos parquet estão disponíveis.")
-    st.stop()
-
-# Garantir que df não é None (para satisfazer o linter)
-assert df is not None, "DataFrame não pode ser None após verificação"
-
-# Seção de Diagnóstico removida conforme solicitado
-
 # Título e Nota de Conformidade LGPD
 st.markdown("""
 <div class="main-title">
@@ -1102,76 +912,123 @@ st.markdown("""
 **Nota de Conformidade LGPD:** Todos os dados são **anonimizados e agregados** para fins de análise estatística, respeitando a natureza sensível do tema.
 """)
 
-# Filtros (Interatividade)
+# Carregar adapter
+adapter = get_adapter()
+
+# Inicializar estados dos filtros na sessao
+if 'ano_selecionado' not in st.session_state:
+    st.session_state.ano_selecionado = (2019, 2024)
+if 'uf_selecionada' not in st.session_state:
+    st.session_state.uf_selecionada = 'Todos'
+if 'municipio_selecionado' not in st.session_state:
+    st.session_state.municipio_selecionado = 'Todos'
+
+# Sidebar: Configuração de Filtros
 st.sidebar.header("Filtros de Análise")
 
-# Filtro de Ano
-if 'ANO_NOTIFIC' in df.columns and df['ANO_NOTIFIC'].notna().any():
-    anos_disponiveis = sorted(df['ANO_NOTIFIC'].dropna().unique())
-    if anos_disponiveis:
-        ano_min = int(min(anos_disponiveis))
-        ano_max = int(max(anos_disponiveis))
-        ano_selecionado = st.sidebar.slider(
-            'Selecione o Período (Anos)',
-            min_value=ano_min,
-            max_value=ano_max,
-            value=(ano_min, ano_max)
-        )
+# 1. Filtro de Ano (Origem: DuckDB Metadata ou fixo)
+# Idealmente pegar do adapter, mas fallback para fixo
+try:
+    if adapter:
+        anos_disp = adapter.get_available_years()
+        if not anos_disp:
+            anos_disp = [2019, 2020, 2021, 2022, 2023, 2024]
     else:
-        ano_selecionado = (2019, 2024)
-        st.sidebar.warning("Anos não disponíveis nos dados")
-else:
-    ano_selecionado = (2019, 2024)
-    st.sidebar.warning("Coluna de ano não encontrada")
-
-# Filtro de Região (UF)
-if 'UF_NOTIFIC' in df.columns:
-    uf_options = ['Todos'] + sorted([uf for uf in df['UF_NOTIFIC'].dropna().unique() if str(uf) != 'nan' and str(uf) != 'N/A'])
-    uf_selecionada = st.sidebar.selectbox('Filtrar por UF', uf_options, index=0)
-else:
-    uf_selecionada = 'Todos'
-
-# Aplicar filtros
-df_filtrado = df.copy()
-
-# Filtro de ano
-if 'ANO_NOTIFIC' in df_filtrado.columns:
-    df_filtrado = df_filtrado[
-        (df_filtrado['ANO_NOTIFIC'] >= ano_selecionado[0]) & 
-        (df_filtrado['ANO_NOTIFIC'] <= ano_selecionado[1])
-    ]
-
-# Filtro de UF
-if uf_selecionada != 'Todos':
-    df_filtrado = df_filtrado[df_filtrado['UF_NOTIFIC'] == uf_selecionada]
+        anos_disp = [2019, 2020, 2021, 2022, 2023, 2024]
     
-    # Filtro de Município (Apenas se a UF for selecionada)
-    if 'MUNICIPIO_NOTIFIC' in df_filtrado.columns:
-        # Buscar todos os municípios da UF selecionada (sem limite)
-        municipios_disponiveis = sorted([m for m in df_filtrado['MUNICIPIO_NOTIFIC'].dropna().unique() 
-                                         if str(m) != 'nan' and str(m) != 'N/A'])
-        if municipios_disponiveis:
-            municipio_options = ['Todos'] + municipios_disponiveis
-            municipio_selecionado = st.sidebar.selectbox(
-                f'Filtrar por Município ({len(municipios_disponiveis)} disponíveis)', 
-                municipio_options, 
-                index=0
-            )
-            
-            if municipio_selecionado != 'Todos':
-                df_filtrado = df_filtrado[df_filtrado['MUNICIPIO_NOTIFIC'] == municipio_selecionado]
-        else:
-            municipio_selecionado = 'Todos'
-    else:
-        municipio_selecionado = 'Todos'
-else:
-    municipio_selecionado = 'Todos'
+    ano_min, ano_max = min(anos_disp), max(anos_disp)
+    st.session_state.ano_selecionado = st.sidebar.slider(
+        'Selecione o Período (Anos)',
+        min_value=int(ano_min),
+        max_value=int(ano_max),
+        value=st.session_state.ano_selecionado
+    )
+except Exception:
+    st.session_state.ano_selecionado = st.sidebar.slider('Selecione o Período', 2019, 2024, (2019, 2024))
+
+# 2. Carregar Dados filtrados por ANO (Primeiro estagio)
+# Isso carrega um subset muito menor que o total
+with st.spinner(f"Carregando dados ({st.session_state.ano_selecionado[0]}-{st.session_state.ano_selecionado[1]})..."):
+    df_filtrado, processor = load_sinan_data_on_demand(
+        adapter, 
+        st.session_state.ano_selecionado, 
+        st.session_state.uf_selecionada, 
+        'Todos'
+    )
+
+if df_filtrado is None or df_filtrado.empty:
+    st.error("Nenhum dado encontrado para o período selecionado.")
+    st.stop()
+
+# 3. Filtros de UF e Municipio (Baseados nos dados carregados do período)
+# Filtro de Região (UF) - Usar adaptador para pegar lista completa
+uf_options = ['Todos']
+if adapter:
+    try:
+        db_ufs = adapter.get_available_ufs()
+        # Filtrar valores inválidos e ordenar
+        clean_ufs = sorted([str(u) for u in db_ufs if str(u) not in ['nan', 'N/A', 'Não informado', 'None']])
+        uf_options += clean_ufs
+    except Exception as e:
+        print(f"Erro ao carregar UFs: {e}")
+elif df_filtrado is not None and 'UF_NOTIFIC' in df_filtrado.columns:
+    # Fallback
+    uf_options += sorted([uf for uf in df_filtrado['UF_NOTIFIC'].dropna().unique() if str(uf) not in ['nan', 'N/A']])
+
+# Garantir que a seleção atual é válida
+if 'uf_selecionada' not in st.session_state:
+    st.session_state.uf_selecionada = 'Todos'
+if st.session_state.uf_selecionada not in uf_options:
+    st.session_state.uf_selecionada = 'Todos'
+
+uf_selecionada = st.sidebar.selectbox(
+    'Filtrar por UF:', 
+    options=uf_options,
+    index=uf_options.index(st.session_state.uf_selecionada),
+    key='uf_selectbox_widget'
+)
+
+# Atualizar state e recarregar se mudou
+if uf_selecionada != st.session_state.uf_selecionada:
+    st.session_state.uf_selecionada = uf_selecionada
+    st.rerun()
+
+# Filtrar dados em memória se necessário (caso o adapter já não tenha filtrado)
+# O adapter filtra se passarmos o UF. Mas para garantir consistência:
+if uf_selecionada != 'Todos' and df_filtrado['UF_NOTIFIC'].nunique() > 1:
+     df_filtrado = df_filtrado[df_filtrado['UF_NOTIFIC'] == uf_selecionada]
+
+# Filtro de Município (Depende do UF selecionado e dos dados carregados)
+municipio_options = ['Todos']
+if 'MUNICIPIO_NOTIFIC' in df_filtrado.columns:
+    muns = sorted([m for m in df_filtrado['MUNICIPIO_NOTIFIC'].dropna().unique() if str(m) not in ['nan','N/A']])
+    municipio_options += muns
+
+if 'municipio_selecionado' not in st.session_state:
+    st.session_state.municipio_selecionado = 'Todos'
+if st.session_state.municipio_selecionado not in municipio_options:
+    st.session_state.municipio_selecionado = 'Todos'
+    
+mun_selecionado = st.sidebar.selectbox(
+    'Filtrar por Município:',
+    options=municipio_options,
+    index=municipio_options.index(st.session_state.municipio_selecionado),
+    key='mun_selectbox_widget'
+)
+
+if mun_selecionado != st.session_state.municipio_selecionado:
+    st.session_state.municipio_selecionado = mun_selecionado
+    st.rerun()
+
+if mun_selecionado != 'Todos':
+    df_filtrado = df_filtrado[df_filtrado['MUNICIPIO_NOTIFIC'] == mun_selecionado]
 
 # Filtro de Tipo de Violência
 if 'TIPO_VIOLENCIA' in df_filtrado.columns:
     tipos_disponiveis = sorted(df_filtrado['TIPO_VIOLENCIA'].dropna().unique())
     if tipos_disponiveis:
         tipo_options = ['Todos'] + tipos_disponiveis
+        # Nota: nao salvamos tipo na session_state para simplificar, mas poderia
         tipo_selecionado = st.sidebar.selectbox('Filtrar por Tipo de Violência', tipo_options, index=0)
         
         if tipo_selecionado != 'Todos':
@@ -1180,6 +1037,11 @@ if 'TIPO_VIOLENCIA' in df_filtrado.columns:
         tipo_selecionado = 'Todos'
 else:
     tipo_selecionado = 'Todos'
+
+# Atualizar variaveis locais para compatibilidade com o resto do codigo
+uf_selecionada = st.session_state.uf_selecionada
+municipio_selecionado = st.session_state.municipio_selecionado
+ano_selecionado = st.session_state.ano_selecionado
 
 # Verificação de Consistência: Contagem de Imperatriz (Debug)
 # Esta seção ajuda a identificar inconsistências nos dados
@@ -1617,6 +1479,11 @@ else:
         # IMPORTANTE: Usar df_filtrado completo e manter índice original para contar corretamente
         # Criar REGISTRO_ID baseado no índice original ANTES de qualquer filtro
         df_demografia_base = df_filtrado.copy()
+        
+        # Filtrar Sexo "Ignorado" conforme solicitação do usuário
+        # FIX: Usar isin para evitar filtrar incorretamente palavras contendo 'i' (como Masculino/Feminino)
+        df_demografia_base = df_demografia_base[df_demografia_base['SEXO'].isin(['Masculino', 'Feminino'])]
+        
         df_demografia_base['REGISTRO_ID_ORIGINAL'] = df_demografia_base.index
         
         # Debug: verificar total de registros antes dos filtros
